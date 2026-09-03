@@ -4,6 +4,7 @@
 **Design version:** 0.1  
 **Date:** 2026-09-03
 
+
 ```mermaid
 flowchart TB
     OT["OT LXC / otns<br/>EdgeX core and device services<br/>ChirpStack and OT protocols<br/>OT MQTT, DB/cache, device interfaces"]
