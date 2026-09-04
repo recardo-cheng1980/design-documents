@@ -1,17 +1,18 @@
-# Solution B — Four-Zone Restricted SSH Administration Design
+# Solution B — DMZ Jump Host and Offline OT Restricted SSH Design
 
 **Document ID:** AIOT-SEC-SSH-SB  
-**Version:** 2.0  
+**Version:** 2.1  
 **Date:** 2026-09-04  
 **Target:** AIoT gateway with unprivileged LXC zones
 
 ## 1. Purpose and decisions
 
-This design provides direct, role-controlled SSH administration for Host, DMZ, IT and OT. Each zone runs its own SSHD and SSSD and authenticates against the same LDAP service. The authenticated LDAP username remains the Linux identity shown by `whoami` and `id`.
+This design provides role-controlled SSH administration for Host, DMZ, IT and OT. Host, DMZ and IT run SSHD with SSSD. OT runs SSHD but has no SSSD, LDAP route, Internet access or direct client route. OT access requires a second SSH hop from DMZ using a short-lived SSH user certificate. The LDAP username remains the Linux identity shown by `whoami` and `id` on both hops.
 
 Decisions:
 
-- `it-admin`, `ot-admin`, `dmz-admin` and `host-admin` can run approved commands, manage approved services and change only allowlisted configuration files in their own zone.
+- `it-admin`, `ot-admin`, `dmz-admin` and `host-admin` can run approved commands, manage approved services and change only allowlisted configuration files in their authorized zone.
+- `ot-admin` and `ot-operator` first authenticate to DMZ using LDAP/SSSD and may enter OT only through the controlled certificate-based second hop.
 - Configuration uploads originate only from an authenticated SSH client and land in a non-executable staging directory; uploads never directly overwrite production files.
 - `ot-operator` can run limited operational commands, view status/logs and restart selected OT services, but cannot change any file.
 - `auditor` logs in only to Host and receives read-only access.
@@ -26,27 +27,28 @@ flowchart TD
     F --> H["Host: SSHD + SSSD"]
     F --> D["DMZ: SSHD + SSSD"]
     F --> I["IT: SSHD + SSSD"]
-    F --> O["OT: SSHD + SSSD"]
-    H & D & I & O --> L["Common redundant LDAP servers"]
+    D -->|"Second SSH hop with user certificate"| O["OT: SSHD, no SSSD"]
+    H & D & I --> L["Common redundant LDAP servers"]
 ```
 
-The connection terminates directly in the selected zone. No Host broker, `lxc-attach`, `nsenter` or second SSH hop is required. A TCP port selects only a candidate destination; authorization is independently enforced by the target firewall, SSHD, SSSD and restricted-shell policy.
+Host, DMZ and IT connections terminate directly in the selected zone. OT is different: the client uses DMZ as an authenticated SSH jump host and then establishes an end-to-end certificate-authenticated SSH session to OT. The user's OT private key and certificate remain on the client. No `lxc-attach`, `nsenter`, agent forwarding or private-key storage in DMZ is used.
 
 | Zone | Accepted LDAP groups | Components | Scope |
 |---|---|---|---|
 | Host | `host-admin`, `auditor` | SSHD, SSSD, restricted shells, helpers, audit view | Host |
-| DMZ | `dmz-admin` | SSHD, SSSD, admin shell, helpers | DMZ |
+| DMZ | `dmz-admin`, `ot-admin`, `ot-operator` | SSHD, SSSD, DMZ admin shell, OT jump shell | DMZ admin or OT transit only |
 | IT | `it-admin` | SSHD, SSSD, admin shell, helpers | IT |
-| OT | `ot-admin`, `ot-operator` | SSHD, SSSD, two role shells, helpers | OT |
+| OT | Trusted SSH certificate principals | SSHD, local accounts, role shells, helpers; no SSSD | OT |
 
 Illustrative routing:
 
 | External port | Destination/function |
 |---:|---|
-| 2222/2223/2224/2225 | Host/IT/OT/DMZ restricted command SSH |
-| 3222/3223/3224/3225 | Host/IT/OT/DMZ Admin-only configuration SFTP |
+| 2222/2223/2225 | Host/IT/DMZ first-hop SSH |
+| 3222/3223/3225 | Host/IT/DMZ Admin-only configuration SFTP |
+| None | OT has no externally reachable SSH/SFTP port |
 
-Management ports are LAN/management-VLAN only. WAN SSH, forwarding, tunnelling, X11 and SSH agent forwarding are denied. Upload listeners are unavailable to Auditor and OT Operator.
+Management ports are LAN/management-VLAN only. WAN SSH, general tunnelling, X11 and SSH agent forwarding are denied. A DMZ `Match Group ot-transit` rule permits only `direct-tcpip` forwarding to the fixed OT SSH address/port using `AllowTcpForwarding local` and `PermitOpen`; it grants no DMZ shell. Firewall policy permits DMZ to OT only on OT SSH and the controlled identity-provisioning endpoint. OT has no Internet default route and no route to LDAP or KMS. Auditor and OT Operator have no upload subsystem. OT Admin may use SFTP through the same ProxyJump path, but OT confines it to configuration staging.
 
 ## 3. Identity and authentication
 
@@ -55,21 +57,93 @@ LDAP is authoritative for username, password or approved public key, unique `uid
 | Group | Example user | Login location |
 |---|---|---|
 | `it-admin` | `iotadmin01` | IT |
-| `ot-admin` | `otadmin01` | OT |
+| `ot-admin` | `otadmin01` | DMZ, then OT certificate jump |
 | `dmz-admin` | `dmzadmin01` | DMZ |
 | `host-admin` | `hostadmin01` | Host |
-| `ot-operator` | `otoperator01` | OT |
+| `ot-operator` | `otoperator01` | DMZ, then OT certificate jump |
 | `auditor` | `auditor01` | Host |
 
-LDAP IDs shall be globally unique, container-visible IDs such as `10001`; they must not equal Host-side LXC id-map bases such as `1200000`. On first login, SSSD resolves the identity and `pam_mkhomedir` creates a restrictive home owned by that LDAP UID/GID. No permanent local passwd entry is required.
+LDAP IDs shall be globally unique, container-visible IDs such as `10001`; they must not equal Host-side LXC id-map bases such as `1200000`. On Host, DMZ and IT, SSSD resolves the identity and `pam_mkhomedir` creates a restrictive home on first login.
 
-All four SSSD instances may use the same LDAP servers and CA, but retain separate configuration, access filter and cache. LDAPS/StartTLS, hostname validation and explicit cache-expiry behavior are mandatory. With server-auth TLS, only the common CA bundle is needed. With LDAP mTLS, use four separate SSSD client keys/certificates.
+Only Host, DMZ and IT run SSSD. These three instances may use the same LDAP servers and CA but retain separate configuration, access filter and cache. LDAPS/StartTLS, hostname validation and explicit cache-expiry behavior are mandatory. OT never queries LDAP. With LDAP mTLS, use three separate SSSD client keys/certificates.
+
+### 3.1 Why OT still needs a local account
+
+An SSH user certificate proves that a CA authorized a principal; it does not create a Linux user. Before certificate authentication, OpenSSH calls NSS `getpwnam("otadmin01")`. If OT has neither SSSD nor a local `otadmin01` record, SSHD rejects the connection before certificate authorization. Therefore the design performs just-in-time (JIT) account provisioning immediately before the second SSH hop.
+
+### 3.2 External certificate issuance, two-hop login and JIT provisioning
+
+```mermaid
+sequenceDiagram
+    participant C as SSH client
+    participant A as External Identity/SSH CA
+    participant D as DMZ SSHD/SSSD and relay
+    participant O as OT provisioner/SSHD
+    C->>A: Authenticate and submit user's public key
+    A->>A: Validate LDAP identity, role and UID/GID
+    A-->>C: Short-lived SSH user certificate
+    A->>D: Signed OT identity assertion
+    D->>O: Relay assertion over allowlisted channel
+    O->>O: Verify and create/update locked local account
+    C->>D: First SSH hop as otadmin01 using LDAP
+    D->>D: Authorize ot-admin or ot-operator transit
+    C->>O: ProxyJump second hop using client-held certificate
+    O->>O: Verify local account, CA, principal, source and validity
+    O-->>C: OT restricted role shell
+```
+
+Detailed sequence:
+
+1. The user generates or holds an SSH key pair on the client. The private key never leaves the client.
+2. The user authenticates to the external Identity/SSH CA and submits the public key. The CA independently validates LDAP account state, `ot-admin`/`ot-operator` membership, UID/GID and issuance policy.
+3. The CA issues a short-lived OpenSSH user certificate whose principal equals the LDAP username. It binds the role, serial, validity and expected DMZ source address and prohibits forwarding in the OT session.
+4. In the same issuance transaction, the external service creates a signed OT identity assertion containing username, UID/GID, role, certificate serial, validity, nonce and OT audience. It sends the assertion to the DMZ identity relay; no private key is sent.
+5. DMZ verifies the assertion signature and relays it over the allowlisted internal provisioning channel. OT verifies the pinned identity CA public key, issuer, audience, nonce, time, username syntax, role, ID range and collisions, then creates or refreshes the locked local account. Certificate issuance should not complete successfully until OT acknowledges provisioning; otherwise the user retries after synchronization.
+6. The local account uses the exact LDAP username and UID/GID, a locked password (`!`), no static authorized keys, no sudo membership and the correct restricted shell. A restrictive home is created only when required. The local record cannot authenticate by itself.
+7. The client starts `ssh -J otadmin01@dmz otadmin01@ot-internal` with its private key and external certificate. The first hop authenticates to DMZ through SSSD/LDAP. DMZ authorizes the transit group and opens only a channel to the fixed OT SSH endpoint.
+8. The second SSH handshake is end-to-end between the client and OT. DMZ cannot use or read the private key and does not terminate OT authentication.
+9. OT SSHD first resolves the JIT local account, then validates `TrustedUserCAKeys`, principal-to-username equality, serial/revocation state, validity and the DMZ `source-address` critical option. Certificate policy or the local account forces the OT Admin/Operator restricted shell.
+10. After success, `whoami` reports `otadmin01`. At logout the client removes short-lived certificate material according to policy; the password-locked local identity may remain for stable ownership and auditing.
+
+Example client configuration keeps the two authentication methods separate:
+
+```sshconfig
+Host gateway-dmz
+    HostName gateway.example.com
+    Port 2225
+    User otadmin01
+    PreferredAuthentications keyboard-interactive,password
+    PubkeyAuthentication no
+
+Host gateway-ot
+    HostName ot.internal
+    User otadmin01
+    ProxyJump gateway-dmz
+    IdentityFile ~/.ssh/id_ed25519_ot
+    CertificateFile ~/.ssh/id_ed25519_ot-cert.pub
+    PreferredAuthentications publickey
+    IdentitiesOnly yes
+```
+
+The user runs `ssh gateway-ot`. OpenSSH authenticates the DMZ hop with LDAP and the OT hop with the client-held external certificate. The command looks like one operation to the user but creates two independent SSH security sessions.
+
+### 3.3 Local account lifecycle and revocation
+
+- JIT accounts may persist to keep stable file ownership, but remain password-locked and certificate-only.
+- The signed assertion has a short lifetime and cannot be replayed; OT stores used nonces until expiration.
+- The SSH certificate lifetime should normally be two to five minutes for connection establishment, with a bounded OT session lifetime.
+- LDAP disablement immediately prevents issuance of new assertions/certificates. A periodically pushed, signed revocation/identity snapshot lets OT disable expired or revoked local accounts without LDAP access.
+- The OT provisioner rejects username/UID collisions, UID changes for an existing username, role escalation and any ID outside the reserved OT administrative range.
+- Account cleanup must not delete files blindly. Disabled identities remain mapped for audit and ownership until an approved retention/migration process completes.
+- OT accepts provisioning and SSH only from the fixed DMZ addresses, but network origin is an additional check—not the sole trust control.
+
+This design prevents a compromised DMZ process from inventing an OT identity because OT accepts only externally signed identity assertions and user certificates. Network origin from DMZ is necessary but not sufficient.
 
 ## 4. Authorization matrix
 
 | Operation | IT Admin | OT Admin | DMZ Admin | Host Admin | OT Operator | Auditor |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
-| Zone | IT | OT | DMZ | Host | OT | Host |
+| Zone/path | IT | DMZ → OT | DMZ | Host | DMZ → OT | Host |
 | Approved diagnostics | Yes | Yes | Yes | Yes | Limited/read-only | Read-only |
 | Read approved config | Yes | Yes | Yes | Yes | No by default | Yes |
 | Edit approved config | Yes | Yes | Yes | Yes | No | No |
@@ -190,7 +264,7 @@ The helper records pre/post state, enforces timeouts and may require a reason or
 
 ## 9. OT Operator
 
-The OT Operator logs in only to OT and may:
+The OT Operator authenticates first to DMZ and reaches OT only through ProxyJump with an external short-lived user certificate. Inside OT the role may:
 
 - run an explicitly approved, read-only diagnostic set;
 - view approved bounded logs and service status;
@@ -208,11 +282,13 @@ Host-controlled collectors export approved zone evidence to a protected Host aud
 
 Host Admin follows the same restricted design and only the Host allowlist. It does not automatically receive arbitrary root, arbitrary LXC control, zone impersonation or permission to change security policy/audit evidence. Emergency full-host access, if required, is a separate break-glass role with stronger authentication, short authorization, approval, session recording and review.
 
-## 12. SSH and KMS
+## 12. SSH certificates, external issuer and KMS
 
-Each zone has a distinct private host key and OpenSSH host certificate with an expected principal such as `gateway-host`, `gateway-dmz`, `gateway-it` or `gateway-ot`. Private keys are generated and retained on-device; KMS/SSH CA signs only public keys. Clients trust the SSH CA and verify the expected zone principal. Certificates are short-lived, renewed and revocable. Command and SFTP listeners in the same zone may use the same zone host identity.
+Each zone has a distinct private host key and OpenSSH host certificate with an expected principal such as `gateway-host`, `gateway-dmz`, `gateway-it` or `gateway-ot`. Host private keys are generated and retained on-device; KMS/Host CA signs only public host keys.
 
-Recommended SSHD controls include `PermitRootLogin no`, `AllowAgentForwarding no`, `AllowTcpForwarding no`, `X11Forwarding no`, `PermitTunnel no`, `GatewayPorts no`, `PermitUserEnvironment no`, group allowlists, session limits and `ForceCommand`.
+The external Identity/SSH CA separately issues short-lived OT **user** certificates to the user's client-held public key. OT stores only the SSH User CA public key in `TrustedUserCAKeys`; neither OT nor DMZ stores the external User CA private key. DMZ never obtains the user's private key or acts as the user for the second hop. Host and user certificate CAs should be logically separated even if one KMS protects both signing services.
+
+Recommended SSHD controls include `PermitRootLogin no`, `AllowAgentForwarding no`, `X11Forwarding no`, `PermitTunnel no`, `GatewayPorts no`, `PermitUserEnvironment no`, group allowlists, session limits and `ForceCommand`. Forwarding is disabled by default. Only the DMZ OT-transit Match block enables local forwarding with `PermitOpen <OT-IP>:22`, no TTY and no DMZ command shell.
 
 ## 13. TPM confinement and capabilities
 
@@ -241,22 +317,23 @@ Logs are locally protected and forwarded to Host and/or a remote SIEM. Administr
 
 ## 16. Verification
 
-1. Confirm every role logs in only at its assigned zone/port and `whoami` shows its LDAP name.
-2. Confirm WAN access, SSH forwarding, alternate shells and unknown commands are denied.
-3. Test injection characters, paths, symlinks, hard links, races, devices, oversized uploads and output bounds.
-4. Confirm each Admin changes only allowlisted configuration in its own zone and metadata/SELinux labels remain correct.
-5. Confirm upload is staging-only, non-executable, separately validated and atomically applied/rolled back.
-6. Confirm OT Operator cannot change any file and can restart only approved OT services.
-7. Confirm Auditor is Host-only/read-only and cannot modify files or service state.
-8. Confirm sessions/editors have no ambient capabilities and helpers expose only documented operations on the target kernel.
-9. Correlate SSH authentication, shell request, helper action and resulting protected audit event.
+1. Confirm direct client-to-OT and OT-to-Internet/LDAP/KMS routes are absent.
+2. Confirm OT Admin/Operator must pass DMZ LDAP authentication and that DMZ forwarding reaches only the fixed OT SSH endpoint.
+3. Confirm OT rejects missing, expired, wrong-principal, wrong-source, revoked or untrusted user certificates.
+4. Confirm JIT provisioning occurs before SSHD account lookup and `whoami` in OT shows the original LDAP username.
+5. Confirm DMZ never receives the user's private key and agent forwarding is disabled.
+6. Test injection characters, paths, symlinks, hard links, races, devices, oversized uploads and output bounds.
+7. Confirm each Admin changes only allowlisted configuration in its zone and OT uploads work only through the jump path.
+8. Confirm OT Operator cannot change any file and can restart only approved OT services.
+9. Confirm Auditor is Host-only/read-only and cannot modify files or service state.
+10. Confirm sessions/editors have no ambient capabilities and correlate both SSH hops, certificate serial and helper audit events.
 
 ## 17. Deployment sequence
 
 1. Define LDAP users, unique IDs and six role groups.
 2. Configure zone networks, management ports and default-deny firewalls.
-3. Deploy four SSHD/SSSD instances and zone access filters.
-4. Provision four SSH host keys/certificates and LDAP trust.
+3. Deploy four SSHD instances, three SSSD instances and the DMZ OT-transit filter.
+4. Provision four SSH host keys/certificates, LDAP trust for Host/DMZ/IT, and the external SSH User CA public key in OT.
 5. Deploy restricted shells, independently validating helpers and signed root-owned policies.
 6. Create Admin-only SFTP listeners and protected staging areas.
 7. Configure first-login homes and protected/remote auditing.
@@ -264,7 +341,11 @@ Logs are locally protected and forwarded to Host and/or a remote SIEM. Administr
 
 ## 18. Normative requirement
 
-The gateway shall authenticate each SSH login in its target zone using LDAP/SSSD and execute the session under the authenticated LDAP identity. IT Admin, OT Admin, DMZ Admin and Host Admin shall receive restricted shells permitting only approved commands, approved service actions and modification of explicitly allowlisted configuration files within their zone. Client uploads shall terminate only in a non-executable staging area and shall require validated, backed-up, atomic installation by a narrow privileged helper.
+Host, DMZ and IT shall authenticate SSH logins using their local SSSD against LDAP. OT shall have no SSSD, LDAP/KMS route, Internet access or direct external SSH route. OT Admin and OT Operator shall authenticate first to DMZ and establish an end-to-end second SSH session through the restricted DMZ jump path using a short-lived user certificate obtained by the user from an external trusted issuer.
+
+Before the second hop, OT shall create or refresh a locked local account from an externally signed JIT identity assertion so that the Linux username and UID/GID match the LDAP identity. OT shall trust only pinned CA public keys; DMZ shall not possess the User CA private key or user private key.
+
+IT Admin, OT Admin, DMZ Admin and Host Admin shall receive restricted shells permitting only approved commands, approved service actions and modification of explicitly allowlisted configuration files within their zone. Client uploads shall terminate only in a non-executable staging area and require validated, backed-up, atomic installation by a narrow privileged helper. OT upload shall traverse the authorized ProxyJump path.
 
 OT Operator shall be limited to approved read-only diagnostics, status/log viewing and restart of specifically allowlisted OT services, with all file changes prohibited. Auditor shall log in only to Host and receive read-only access to approved Host and collected zone evidence, with all file and service changes prohibited.
 
