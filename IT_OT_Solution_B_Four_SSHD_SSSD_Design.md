@@ -1,0 +1,271 @@
+# Solution B — Four-Zone Restricted SSH Administration Design
+
+**Document ID:** AIOT-SEC-SSH-SB  
+**Version:** 2.0  
+**Date:** 2026-09-04  
+**Target:** AIoT gateway with unprivileged LXC zones
+
+## 1. Purpose and decisions
+
+This design provides direct, role-controlled SSH administration for Host, DMZ, IT and OT. Each zone runs its own SSHD and SSSD and authenticates against the same LDAP service. The authenticated LDAP username remains the Linux identity shown by `whoami` and `id`.
+
+Decisions:
+
+- `it-admin`, `ot-admin`, `dmz-admin` and `host-admin` can run approved commands, manage approved services and change only allowlisted configuration files in their own zone.
+- Configuration uploads originate only from an authenticated SSH client and land in a non-executable staging directory; uploads never directly overwrite production files.
+- `ot-operator` can run limited operational commands, view status/logs and restart selected OT services, but cannot change any file.
+- `auditor` logs in only to Host and receives read-only access.
+- No role receives arbitrary commands, arbitrary paths, unrestricted `sudo` or a general root shell.
+- Ambient capabilities and capability inheritance are not used.
+
+## 2. Architecture
+
+```mermaid
+flowchart TD
+    C["Management SSH client"] --> F["Management firewall and port routing"]
+    F --> H["Host: SSHD + SSSD"]
+    F --> D["DMZ: SSHD + SSSD"]
+    F --> I["IT: SSHD + SSSD"]
+    F --> O["OT: SSHD + SSSD"]
+    H & D & I & O --> L["Common redundant LDAP servers"]
+```
+
+The connection terminates directly in the selected zone. No Host broker, `lxc-attach`, `nsenter` or second SSH hop is required. A TCP port selects only a candidate destination; authorization is independently enforced by the target firewall, SSHD, SSSD and restricted-shell policy.
+
+| Zone | Accepted LDAP groups | Components | Scope |
+|---|---|---|---|
+| Host | `host-admin`, `auditor` | SSHD, SSSD, restricted shells, helpers, audit view | Host |
+| DMZ | `dmz-admin` | SSHD, SSSD, admin shell, helpers | DMZ |
+| IT | `it-admin` | SSHD, SSSD, admin shell, helpers | IT |
+| OT | `ot-admin`, `ot-operator` | SSHD, SSSD, two role shells, helpers | OT |
+
+Illustrative routing:
+
+| External port | Destination/function |
+|---:|---|
+| 2222/2223/2224/2225 | Host/IT/OT/DMZ restricted command SSH |
+| 3222/3223/3224/3225 | Host/IT/OT/DMZ Admin-only configuration SFTP |
+
+Management ports are LAN/management-VLAN only. WAN SSH, forwarding, tunnelling, X11 and SSH agent forwarding are denied. Upload listeners are unavailable to Auditor and OT Operator.
+
+## 3. Identity and authentication
+
+LDAP is authoritative for username, password or approved public key, unique `uidNumber`/`gidNumber`, groups and account state.
+
+| Group | Example user | Login location |
+|---|---|---|
+| `it-admin` | `iotadmin01` | IT |
+| `ot-admin` | `otadmin01` | OT |
+| `dmz-admin` | `dmzadmin01` | DMZ |
+| `host-admin` | `hostadmin01` | Host |
+| `ot-operator` | `otoperator01` | OT |
+| `auditor` | `auditor01` | Host |
+
+LDAP IDs shall be globally unique, container-visible IDs such as `10001`; they must not equal Host-side LXC id-map bases such as `1200000`. On first login, SSSD resolves the identity and `pam_mkhomedir` creates a restrictive home owned by that LDAP UID/GID. No permanent local passwd entry is required.
+
+All four SSSD instances may use the same LDAP servers and CA, but retain separate configuration, access filter and cache. LDAPS/StartTLS, hostname validation and explicit cache-expiry behavior are mandatory. With server-auth TLS, only the common CA bundle is needed. With LDAP mTLS, use four separate SSSD client keys/certificates.
+
+## 4. Authorization matrix
+
+| Operation | IT Admin | OT Admin | DMZ Admin | Host Admin | OT Operator | Auditor |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Zone | IT | OT | DMZ | Host | OT | Host |
+| Approved diagnostics | Yes | Yes | Yes | Yes | Limited/read-only | Read-only |
+| Read approved config | Yes | Yes | Yes | Yes | No by default | Yes |
+| Edit approved config | Yes | Yes | Yes | Yes | No | No |
+| Client configuration upload | Yes | Yes | Yes | Yes | No | No |
+| Apply/rollback config | Yes | Yes | Yes | Yes | No | No |
+| Delete optional config | Policy-controlled | Policy-controlled | Policy-controlled | Policy-controlled | No | No |
+| Service status/logs | Yes | Yes | Yes | Yes | Yes | Yes |
+| Restart approved service | Yes | Yes | Yes | Yes | Limited | No |
+| Start/stop approved service | Policy-controlled | Policy-controlled | Policy-controlled | Policy-controlled | No | No |
+| Arbitrary file/command/shell | No | No | No | No | No | No |
+
+Authorization is default-deny and must match user, LDAP role, login zone, operation ID, resource ID and argument schema. Logical IDs replace paths and raw commands:
+
+```text
+config view nginx-main
+config edit nginx-main
+service restart nginx
+log view nginx --lines 200
+```
+
+The interface never exposes `vi /path`, `rm /path`, `cp`, `systemctl *` or arbitrary command strings.
+
+## 5. Restricted shell
+
+SSHD `ForceCommand` starts a role-specific shell. The shell parses a small grammar without `/bin/sh -c`, rejects unknown options and directly executes fixed programs with fixed argument arrays.
+
+Approved command families:
+
+```text
+help
+session info
+config list|view|edit|validate|apply|rollback|delete
+service list|status|start|stop|restart
+log list|view
+diagnostic <approved-id>
+resource status
+security status
+```
+
+The role policy determines which verbs and IDs are visible. Pipes, redirection, substitutions, shell escapes, interpreters, user executables, user-controlled `PATH`/loader variables and alternate subsystems are prohibited.
+
+## 6. Privileged helpers
+
+Sessions remain their real unprivileged LDAP UID. Root-owned, function-specific helpers perform only protected operations:
+
+| Helper | Function |
+|---|---|
+| `zone-config-control` | Validate, back up, install, roll back or remove approved config |
+| `zone-service-control` | Query/control allowlisted services |
+| `zone-log-read` | Return bounded output from protected approved logs |
+| `zone-status-read` | Return approved health/resource/security data |
+
+These are narrow privilege boundaries, not persistent general command brokers. Exact sudoers, a minimal setuid entry point or polkit may launch them. Never authorize `systemctl *`, `cp *`, `rm *` or `vi *`.
+
+Every helper independently revalidates the caller UID, LDAP role, zone, operation and logical ID using root-owned policy. It uses absolute paths, a clean environment, restrictive umask, no-follow descriptor-based path handling, input/output limits and timeouts. Policy or audit initialization failure denies mutation.
+
+## 7. Configuration-file management
+
+Only exact configuration objects in the zone/role allowlist can be changed. The policy maps each `config-id` to a fixed target, validator, metadata and optional related service. Users never submit the production target path.
+
+Example:
+
+```yaml
+configs:
+  mosquitto-main:
+    target: /etc/mosquitto/mosquitto.conf
+    validator: mosquitto-config-check
+    roles: [ot-admin]
+    optional: false
+```
+
+### 7.1 Read and edit
+
+`config view` performs safe fixed-target lookup, size bounds, optional secret redaction and auditing. Direct editing under `/etc` is forbidden.
+
+`config edit` copies the current file to user staging, records its hash, opens only that staging copy as the LDAP user, validates it, displays a redacted diff and applies it through the helper. An editor must have shell escapes, alternate-file opening and arbitrary writes disabled. If reliable confinement is unavailable, interactive editing is omitted and upload plus validate/apply is required.
+
+### 7.2 Client upload
+
+```mermaid
+flowchart TD
+    C["Authenticated Admin SSH client"] --> S["Zone internal-SFTP listener"]
+    S --> U["User-specific staging area"]
+    U --> V["Validate against config ID"]
+    V --> A["Backup and atomic apply"]
+```
+
+- Only the four Admin roles may upload.
+- Upload direction is client to the user's staging directory only.
+- Staging is `noexec,nodev,nosuid`, quota/size/rate limited and periodically cleaned.
+- Reject symlinks, hard links, devices, sockets, FIFOs, executables and invalid names/types.
+- Upload never writes directly to `/etc`, `/usr` or another protected location.
+- Upload does not activate content; the user invokes `config validate` and `config apply` with a logical ID.
+- The helper rechecks ownership, type, link count, size and hash immediately before apply.
+
+### 7.3 Atomic apply and rollback
+
+The helper validates caller/policy and syntax/semantics, checks concurrent changes, creates a protected versioned backup, writes a temporary file in the target filesystem, assigns fixed owner/group/mode/ACL/SELinux label, calls `fsync`, and atomically renames it. It then performs post-validation and approved service reload/restart. Failure automatically restores the prior version.
+
+Delete is denied by default. It is permitted only for a policy object marked `optional: true`, and moves the file to protected backup storage. Critical configuration uses disable/rollback instead.
+
+Never allow these roles to modify passwd/shadow, PAM/SSSD, SSH keys/configuration, shell/helper/sudo policy, boot/kernel/LXC/firewall/SELinux policy, executables/libraries/startup scripts, audit evidence, TPM state or KMS credentials. Such changes require a signed system update or separate break-glass process.
+
+## 8. Service management
+
+Policy maps each logical service ID to one exact unit and allowed verbs. Wildcards, aliases and user-provided units are rejected.
+
+```yaml
+services:
+  chirpstack:
+    unit: chirpstack.service
+    roles:
+      ot-admin: [status, start, stop, restart]
+      ot-operator: [status, restart]
+```
+
+The helper records pre/post state, enforces timeouts and may require a reason or maintenance window. Daemon reload, enable/disable, mask/unmask and unit-file editing are denied unless separately modeled.
+
+## 9. OT Operator
+
+The OT Operator logs in only to OT and may:
+
+- run an explicitly approved, read-only diagnostic set;
+- view approved bounded logs and service status;
+- restart only specifically allowlisted OT services.
+
+The role cannot create, upload, edit, replace, rename or delete any file; apply or roll back configuration; start/stop services; run arbitrary `systemctl`; or use SCP, SFTP, shell, interpreter or `sudo`. Diagnostic wrappers supply fixed safe options and cannot modify state.
+
+## 10. Auditor
+
+The Auditor logs in only to Host and receives a read-only restricted shell. It may view approved configuration snapshots, logs, audit records, service status, resources and security/compliance status for Host and collected IT/OT/DMZ information.
+
+Host-controlled collectors export approved zone evidence to a protected Host audit view. Auditor never enters a zone and cannot upload, create, edit or delete files; change service state; invoke privileged helpers with mutation verbs; use `sudo`, `lxc-attach` or `nsenter`; or alter evidence. Approved report download may be enabled as a read-only exception.
+
+## 11. Host Admin boundary
+
+Host Admin follows the same restricted design and only the Host allowlist. It does not automatically receive arbitrary root, arbitrary LXC control, zone impersonation or permission to change security policy/audit evidence. Emergency full-host access, if required, is a separate break-glass role with stronger authentication, short authorization, approval, session recording and review.
+
+## 12. SSH and KMS
+
+Each zone has a distinct private host key and OpenSSH host certificate with an expected principal such as `gateway-host`, `gateway-dmz`, `gateway-it` or `gateway-ot`. Private keys are generated and retained on-device; KMS/SSH CA signs only public keys. Clients trust the SSH CA and verify the expected zone principal. Certificates are short-lived, renewed and revocable. Command and SFTP listeners in the same zone may use the same zone host identity.
+
+Recommended SSHD controls include `PermitRootLogin no`, `AllowAgentForwarding no`, `AllowTcpForwarding no`, `X11Forwarding no`, `PermitTunnel no`, `GatewayPorts no`, `PermitUserEnvironment no`, group allowlists, session limits and `ForceCommand`.
+
+## 13. TPM confinement and capabilities
+
+The physical TPM remains Host-only; `/dev/tpm0` and `/dev/tpmrm0` are not exposed to zones. A Host service may provide a narrow, authenticated TPM operation with separate objects, policy, rate limits and auditing.
+
+Administrative shells/editors run as the real LDAP UID with no broad effective or ambient capability set. Only fixed helpers execute privileged operations. Therefore non-functional ambient/keep-caps support on the target kernel does not affect this design.
+
+## 14. Audit requirements
+
+Every accepted and rejected request records UTC time, session/request ID, LDAP username/UID/GID/role, source address, zone, normalized operation/resource, authorization result/reason, policy version, exit/duration and—when applicable—before/after hashes, validator result and service state. Secrets are never logged.
+
+Logs are locally protected and forwarded to Host and/or a remote SIEM. Administrators cannot alter already-forwarded evidence. Apply quotas, rotation and retention; alert on repeated denials, policy tampering, validation failures and unusual restart frequency.
+
+## 15. Failure behavior
+
+| Failure | Behavior |
+|---|---|
+| Unresolved/disabled identity or role | Deny |
+| Invalid/missing policy | Deny all administration |
+| Audit initialization failure | Deny mutation |
+| Upload quota exceeded | Reject without affecting active config |
+| Config validation failure | Keep current config |
+| Post-apply health failure | Restore backup |
+| Service timeout | Report, audit and alert as policy requires |
+| Expired SSH certificate | Reject; use controlled renewal/recovery |
+
+## 16. Verification
+
+1. Confirm every role logs in only at its assigned zone/port and `whoami` shows its LDAP name.
+2. Confirm WAN access, SSH forwarding, alternate shells and unknown commands are denied.
+3. Test injection characters, paths, symlinks, hard links, races, devices, oversized uploads and output bounds.
+4. Confirm each Admin changes only allowlisted configuration in its own zone and metadata/SELinux labels remain correct.
+5. Confirm upload is staging-only, non-executable, separately validated and atomically applied/rolled back.
+6. Confirm OT Operator cannot change any file and can restart only approved OT services.
+7. Confirm Auditor is Host-only/read-only and cannot modify files or service state.
+8. Confirm sessions/editors have no ambient capabilities and helpers expose only documented operations on the target kernel.
+9. Correlate SSH authentication, shell request, helper action and resulting protected audit event.
+
+## 17. Deployment sequence
+
+1. Define LDAP users, unique IDs and six role groups.
+2. Configure zone networks, management ports and default-deny firewalls.
+3. Deploy four SSHD/SSSD instances and zone access filters.
+4. Provision four SSH host keys/certificates and LDAP trust.
+5. Deploy restricted shells, independently validating helpers and signed root-owned policies.
+6. Create Admin-only SFTP listeners and protected staging areas.
+7. Configure first-login homes and protected/remote auditing.
+8. Run positive, negative and race-condition security tests before enabling production access.
+
+## 18. Normative requirement
+
+The gateway shall authenticate each SSH login in its target zone using LDAP/SSSD and execute the session under the authenticated LDAP identity. IT Admin, OT Admin, DMZ Admin and Host Admin shall receive restricted shells permitting only approved commands, approved service actions and modification of explicitly allowlisted configuration files within their zone. Client uploads shall terminate only in a non-executable staging area and shall require validated, backed-up, atomic installation by a narrow privileged helper.
+
+OT Operator shall be limited to approved read-only diagnostics, status/log viewing and restart of specifically allowlisted OT services, with all file changes prohibited. Auditor shall log in only to Host and receive read-only access to approved Host and collected zone evidence, with all file and service changes prohibited.
+
+No normal role shall receive unrestricted shell access, arbitrary commands or paths, unrestricted sudo, cross-zone shell access or broad Linux capabilities. The implementation shall not depend on ambient capabilities, and all operations shall be attributable to the authenticated LDAP username in protected audit logs.
