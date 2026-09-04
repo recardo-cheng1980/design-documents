@@ -1,7 +1,7 @@
 # Solution B — DMZ Jump Host and Offline OT Restricted SSH Design
 
 **Document ID:** AIOT-SEC-SSH-SB  
-**Version:** 2.2  
+**Version:** 2.3  
 **Date:** 2026-09-04  
 **Target:** AIoT gateway with unprivileged LXC zones
 
@@ -66,13 +66,56 @@ LDAP is authoritative for username, password or approved public key, unique `uid
 
 LDAP IDs shall be globally unique, container-visible IDs such as `10001`; they must not equal Host-side LXC id-map bases such as `1200000`. On Host, DMZ and IT, SSSD resolves the identity and `pam_mkhomedir` creates a restrictive home on first login.
 
-Only Host, DMZ and IT run SSSD. These three instances may use the same LDAP servers and CA but retain separate configuration, access filter and cache. LDAPS/StartTLS, hostname validation and explicit cache-expiry behavior are mandatory. OT never queries LDAP. With LDAP mTLS, use three separate SSSD client keys/certificates.
+Only Host, DMZ and IT run SSSD. These three instances may use the same LDAP servers and CA but retain separate configuration, access filter and cache. LDAPS or StartTLS, server-certificate validation, hostname validation and explicit cache-expiry behavior are mandatory. OT never queries LDAP.
 
-### 3.1 Why OT still needs a local account
+### 3.1 SSSD-to-LDAP TLS without mutual client certificates
+
+SSSD is the LDAP client; there is no separate “SSSD server.” The LDAP server authenticates users and supplies directory identity data. This design deliberately does **not** use mTLS client-certificate authentication between the DUT SSSD instances and LDAP.
+
+The connection uses one-way authenticated TLS:
+
+1. Host, DMZ or IT SSSD opens LDAPS on TCP 636, or LDAP with mandatory StartTLS on TCP 389.
+2. LDAP presents its server certificate.
+3. SSSD validates the certificate chain, hostname/SAN, validity period and approved CA.
+4. LDAP does not request or validate a DUT SSSD client certificate.
+5. SSSD performs directory searches using a dedicated, least-privileged Bind DN credential when authenticated search is required.
+6. During password login, PAM/SSSD verifies the individual user's credential through the protected LDAP channel.
+7. LDAP applies directory ACLs, account status, group membership and authentication policy and returns only the required result.
+
+Required controls:
+
+- Set TLS certificate checking to mandatory, for example `ldap_tls_reqcert = demand`; never use `allow` or `never` in production.
+- Configure the approved CA bundle explicitly and keep it root-owned/read-only.
+- Do not configure `ldap_tls_cert` or `ldap_tls_key` for an SSSD client certificate.
+- The LDAP server must not require TLS client-certificate verification for these three DUT source identities.
+- Use a different Bind DN for Host, DMZ and IT where operationally practical. Each account receives only directory search/read permissions required by that zone's access filter and cannot modify LDAP.
+- Store Bind DN secrets in root-only files (`0600`) or retrieve them through a protected local secret mechanism. Never place them in logs, shell environments or user-readable images.
+- Restrict Host/DMZ/IT egress to the approved LDAP IP addresses and ports. LDAP firewall policy accepts connections only from authorized gateway networks where feasible.
+- Apply LDAP-side query limits, authentication rate limiting, lockout policy and audit logging.
+- Rotate Bind credentials and the LDAP server certificate/CA through controlled lifecycle procedures.
+- Anonymous LDAP search is disabled unless a documented directory policy proves that only non-sensitive public attributes are exposed; authenticated least-privilege bind is preferred.
+
+Illustrative SSSD direction—not a complete production configuration:
+
+```ini
+[domain/gateway]
+id_provider = ldap
+auth_provider = ldap
+ldap_uri = ldaps://ldap1.example.com,ldaps://ldap2.example.com
+ldap_tls_cacert = /etc/sssd/pki/ldap-ca.pem
+ldap_tls_reqcert = demand
+ldap_default_bind_dn = uid=sssd-dmz,ou=svc,dc=example,dc=com
+ldap_default_authtok_type = password
+# ldap_tls_cert and ldap_tls_key intentionally not configured
+```
+
+Removing mTLS removes certificate-based device/client authentication at LDAP. Confidentiality, integrity and LDAP server authentication remain protected by TLS; SSSD is identified for directory search by its Bind DN credential and constrained network source. This tradeoff must be recorded in the threat model. Compromise of a Bind credential can expose attributes permitted to that account, so the credential must be zone-specific, read-only, rotatable and narrowly scoped.
+
+### 3.2 Why OT still needs a local account
 
 An SSH user certificate proves that a CA authorized a principal; it does not create a Linux user. Before certificate authentication, OpenSSH calls NSS `getpwnam("otadmin01")`. If OT has neither SSSD nor a local `otadmin01` record, SSHD rejects the connection before certificate authorization. Therefore the design performs just-in-time (JIT) account provisioning immediately before the second SSH hop.
 
-### 3.2 External certificate issuance, two-hop login and JIT provisioning
+### 3.3 External certificate issuance, two-hop login and JIT provisioning
 
 ```mermaid
 sequenceDiagram
@@ -128,7 +171,7 @@ Host gateway-ot
 
 The user runs `ssh gateway-ot`. OpenSSH authenticates the DMZ hop with LDAP and the OT hop with the client-held external certificate. The command looks like one operation to the user but creates two independent SSH security sessions.
 
-### 3.3 Local account lifecycle and revocation
+### 3.4 Local account lifecycle and revocation
 
 - JIT accounts may persist to keep stable file ownership, but remain password-locked and certificate-only.
 - The signed assertion has a short lifetime and cannot be replayed; OT stores used nonces until expiration.
@@ -140,7 +183,7 @@ The user runs `ssh gateway-ot`. OpenSSH authenticates the DMZ hop with LDAP and 
 
 This design prevents a compromised DMZ process from inventing an OT identity because OT accepts only externally signed identity assertions and user certificates. Network origin from DMZ is necessary but not sufficient.
 
-### 3.4 Offline certificate authentication for every zone
+### 3.5 Offline certificate authentication for every zone
 
 “Offline” means the gateway cannot reach LDAP, KMS or the external certificate service, while an authorized client can still reach the gateway management network. The client must obtain certificates before the outage or maintenance window.
 
@@ -186,7 +229,7 @@ Offline security requirements:
 
 Stock OpenSSH cannot create a previously unknown local user from a certificate during pre-authentication because it performs `getpwnam()` first. Therefore a completely new user cannot perform a first-ever offline login from a certificate alone. The recommended design provisions the locked account when the external server issues the certificate and waits for the gateway acknowledgement before returning a usable certificate. If the device is already offline and the account was never provisioned, access requires a separately authorized, signed offline identity-import process; it must not fall back to a shared account or UID 0.
 
-### 3.5 Offline login flows
+### 3.6 Offline login flows
 
 For Host, IT or DMZ administration, the client connects directly to the selected zone listener using its target-specific certificate. SSHD resolves the pre-provisioned local account, verifies the zone CA/principal and starts the same role-restricted shell used online.
 
@@ -380,7 +423,7 @@ Logs are locally protected and forwarded to Host and/or a remote SIEM. Administr
 ## 16. Verification
 
 1. Confirm direct client-to-OT and OT-to-Internet/LDAP/KMS routes are absent.
-2. Confirm OT Admin/Operator must pass DMZ LDAP authentication and that DMZ forwarding reaches only the fixed OT SSH endpoint.
+2. Confirm OT Admin/Operator must pass DMZ LDAP authentication while online or valid DMZ transit-certificate authentication while offline, and that forwarding reaches only the fixed OT SSH endpoint.
 3. Confirm OT rejects missing, expired, wrong-principal, wrong-source, revoked or untrusted user certificates.
 4. Confirm JIT provisioning occurs before SSHD account lookup and `whoami` in OT shows the original LDAP username.
 5. Confirm DMZ never receives the user's private key and agent forwarding is disabled.
@@ -393,6 +436,10 @@ Logs are locally protected and forwarded to Host and/or a remote SIEM. Administr
 12. Verify cross-zone certificates, expired certificates, stale manifests, unknown local users and revoked serials fail closed.
 13. Verify an offline OT login requires both the DMZ transit certificate and the separate OT role certificate.
 14. Verify the session supervisor terminates a session at its approved maximum/certificate expiry.
+15. Verify Host/DMZ/IT SSSD successfully authenticate through LDAPS/StartTLS without presenting a client certificate.
+16. Verify SSSD rejects an expired, untrusted, hostname-mismatched or missing LDAP server certificate.
+17. Verify every zone Bind DN is read-only, cannot modify LDAP and cannot read attributes outside its approved scope.
+18. Verify LDAP and gateway logs identify failed bind attempts and rate-limit repeated authentication failures.
 
 ## 17. Deployment sequence
 
@@ -400,14 +447,17 @@ Logs are locally protected and forwarded to Host and/or a remote SIEM. Administr
 2. Configure zone networks, management ports and default-deny firewalls.
 3. Deploy four SSHD instances, three SSSD instances and the DMZ OT-transit filter.
 4. Provision four SSH host keys/certificates, LDAP trust for Host/DMZ/IT, and target-specific external SSH User CA trust in every zone.
-5. Deploy restricted shells, independently validating helpers and signed root-owned policies.
-6. Create Admin-only SFTP listeners and protected staging areas.
-7. Configure first-login homes and protected/remote auditing.
-8. Run positive, negative and race-condition security tests before enabling production access.
+5. Create three separate read-only LDAP Bind DN accounts, protect their credentials and configure LDAP to use server-authenticated TLS without requiring DUT client certificates.
+6. Deploy restricted shells, independently validating helpers and signed root-owned policies.
+7. Create Admin-only SFTP listeners and protected staging areas.
+8. Configure first-login homes and protected/remote auditing.
+9. Run positive, negative and race-condition security tests before enabling production access.
 
 ## 18. Normative requirement
 
 While external identity services are reachable, Host, DMZ and IT shall authenticate normal SSH logins using their local SSSD against LDAP. OT shall have no SSSD, LDAP/KMS route, Internet access or direct external SSH route. OT Admin and OT Operator shall authenticate first to DMZ and establish an end-to-end second SSH session through the restricted DMZ jump path using a user certificate obtained by the user from an external trusted issuer.
+
+SSSD-to-LDAP connections shall use LDAPS or mandatory StartTLS with strict LDAP server certificate and hostname validation. LDAP shall not require or validate client certificates from the DUT SSSD instances. Directory searches shall use separate, least-privileged, read-only Bind DN credentials for Host, DMZ and IT where practical. Disabling mutual TLS shall not disable encryption or LDAP server authentication.
 
 When the gateway is offline from LDAP/KMS/external CA, Host, DMZ, IT and OT shall accept only valid, pre-issued, target-specific SSH user certificates backed by a previously synchronized signed identity entitlement and password-locked local account. OT access shall require a DMZ OT-transit certificate for the first hop and a separate OT role certificate for the second hop. Certificate issuance, identity synchronization and revocation data shall normally complete before offline operation begins.
 
