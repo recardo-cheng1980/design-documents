@@ -1,0 +1,570 @@
+<title>Trust Chain Handoff</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Source+Sans+3:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #eef1f0;
+    --paper: #ffffff;
+    --ink: #16211f;
+    --ink-soft: #4a5a57;
+    --line: #d3dbd8;
+    --accent: #1f6f66;
+    --accent-soft: #e4efec;
+    --accent-ink: #0e453f;
+    --good: #2f7a4f;
+    --good-bg: #e5f2e9;
+    --warn: #a5720e;
+    --warn-bg: #faf0dc;
+    --bad: #a63f3f;
+    --bad-bg: #f7e6e6;
+    --rail: #c9d3d0;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101615;
+      --paper: #182220;
+      --ink: #e9f0ee;
+      --ink-soft: #a9b8b4;
+      --line: #2b3937;
+      --accent: #5fc4b5;
+      --accent-soft: #1c3230;
+      --accent-ink: #a9ecdf;
+      --good: #79cf9a;
+      --good-bg: #1b3527;
+      --warn: #e0b35a;
+      --warn-bg: #3a2f14;
+      --bad: #e58888;
+      --bad-bg: #3a2020;
+      --rail: #2b3937;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101615;
+    --paper: #182220;
+    --ink: #e9f0ee;
+    --ink-soft: #a9b8b4;
+    --line: #2b3937;
+    --accent: #5fc4b5;
+    --accent-soft: #1c3230;
+    --accent-ink: #a9ecdf;
+    --good: #79cf9a;
+    --good-bg: #1b3527;
+    --warn: #e0b35a;
+    --warn-bg: #3a2f14;
+    --bad: #e58888;
+    --bad-bg: #3a2020;
+    --rail: #2b3937;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Source Sans 3', system-ui, sans-serif;
+    line-height: 1.5;
+  }
+  h1, h2, h3 { font-family: 'Barlow Semi Condensed', system-ui, sans-serif; text-wrap: balance; margin: 0; }
+  code, .mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+
+  .deck {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 48px 24px 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+
+  .deckhead {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 0 4px 8px;
+  }
+  .deckhead .brand {
+    font-family: 'Barlow Semi Condensed', sans-serif;
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .deckhead .brand strong { color: var(--accent-ink); }
+  .deckhead .date { font-size: 13px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
+  .nav {
+    position: fixed;
+    right: 18px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    z-index: 10;
+  }
+  .nav a {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--rail);
+    display: block;
+    transition: background 0.15s, transform 0.15s;
+  }
+  .nav a:hover, .nav a:focus-visible { background: var(--accent); transform: scale(1.3); outline: none; }
+  @media (max-width: 860px) { .nav { display: none; } }
+
+  .slide {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 44px clamp(24px, 5vw, 64px);
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+    scroll-margin-top: 20px;
+  }
+
+  .eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .eyebrow .num {
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    border-radius: 5px;
+    padding: 2px 7px;
+    font-weight: 600;
+  }
+  .eyebrow .sep { color: var(--line); }
+
+  h2.title { font-size: clamp(26px, 3.4vw, 38px); font-weight: 700; color: var(--ink); }
+  .sub { color: var(--ink-soft); font-size: 16px; max-width: 68ch; }
+
+  /* ---- Title slide ---- */
+  .slide.title-slide { align-items: flex-start; padding-top: 56px; padding-bottom: 56px; }
+  .kicker { font-family: 'IBM Plex Mono', monospace; font-size: 13px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-soft); }
+  .hero-title { font-size: clamp(38px, 6vw, 64px); font-weight: 700; line-height: 1.02; }
+  .hero-title .accent { color: var(--accent); }
+  .hero-sub { font-size: 18px; color: var(--ink-soft); max-width: 62ch; }
+  .parties {
+    display: flex; gap: 14px; flex-wrap: wrap; margin-top: 6px;
+  }
+  .party {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 18px;
+    min-width: 220px;
+  }
+  .party .role { font-family: 'IBM Plex Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); }
+  .party .who { font-weight: 700; font-size: 17px; margin-top: 3px; }
+  .party .what { color: var(--ink-soft); font-size: 13.5px; margin-top: 3px; }
+
+  /* ---- generic content blocks ---- */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+
+  ul.plain, ol.plain { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; }
+  ol.agenda { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
+  ol.agenda li {
+    display: grid; grid-template-columns: 34px 1fr; gap: 14px;
+    padding: 13px 0; border-bottom: 1px solid var(--line);
+    align-items: baseline;
+  }
+  ol.agenda li:last-child { border-bottom: none; }
+  ol.agenda .n { font-family: 'IBM Plex Mono', monospace; color: var(--accent); font-weight: 500; }
+  ol.agenda .label { font-weight: 600; font-size: 16.5px; }
+  ol.agenda .desc { grid-column: 2; color: var(--ink-soft); font-size: 14px; margin-top: -4px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th { background: var(--accent-soft); color: var(--accent-ink); font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.path, span.path { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--ink-soft); }
+
+  .pill {
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; white-space: nowrap;
+  }
+  .pill.good { background: var(--good-bg); color: var(--good); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); }
+  .pill.bad  { background: var(--bad-bg);  color: var(--bad); }
+
+  .callout {
+    border: 1.5px solid var(--warn);
+    background: var(--warn-bg);
+    border-radius: 12px;
+    padding: 20px 24px;
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  .callout .mark {
+    font-family: 'Barlow Semi Condensed', sans-serif;
+    font-weight: 700; font-size: 26px; color: var(--warn);
+    line-height: 1;
+  }
+  .callout .body { color: var(--ink); font-size: 14.5px; }
+  .callout .body b { color: var(--warn); }
+
+  /* ---- diagram ---- */
+  .diagram {
+    display: flex; gap: 0; align-items: stretch;
+    border: 1px dashed var(--rail); border-radius: 12px; padding: 22px;
+    background: var(--accent-soft);
+    overflow-x: auto;
+  }
+  .col { display: flex; flex-direction: column; gap: 10px; min-width: 230px; flex: 1; }
+  .col h4 { font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-soft); margin-bottom: 4px; }
+  .node {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 9px;
+    padding: 10px 13px; font-size: 13.5px; display: flex; flex-direction: column; gap: 3px;
+  }
+  .node .name { font-weight: 600; }
+  .node .tag { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--ink-soft); }
+  .node.gap { border-style: dashed; border-color: var(--warn); background: transparent; }
+  .node.gap .tag { color: var(--warn); }
+  .arrowcol { display: flex; align-items: center; justify-content: center; width: 46px; color: var(--accent); font-size: 20px; flex-shrink: 0; }
+
+  .stepflow { display: flex; flex-direction: column; gap: 0; }
+  .step {
+    display: grid; grid-template-columns: 30px 1fr; gap: 14px;
+    padding: 11px 0; border-bottom: 1px dashed var(--line);
+  }
+  .step:last-child { border-bottom: none; }
+  .step .idx { font-family: 'IBM Plex Mono', monospace; color: var(--accent); font-weight: 600; }
+  .step .txt { font-size: 14px; }
+  .step .txt b { color: var(--ink); }
+  .step.gap .idx { color: var(--warn); }
+  .step.gap .txt { color: var(--warn); font-style: italic; }
+
+  .split-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); gap: 14px; }
+  .owner-card { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .owner-card .owner { font-family: 'IBM Plex Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .owner-card.wnc { border-top: 4px solid var(--accent); }
+  .owner-card.wnc .owner { color: var(--accent); }
+  .owner-card.svs { border-top: 4px solid var(--warn); }
+  .owner-card.svs .owner { color: var(--warn); }
+  .owner-card .item { font-weight: 600; margin-top: 6px; font-size: 14.5px; }
+  .owner-card .why { color: var(--ink-soft); font-size: 13px; margin-top: 4px; }
+
+  .qbox { display: flex; flex-direction: column; gap: 14px; }
+  .q {
+    display: grid; grid-template-columns: 40px 1fr; gap: 14px;
+    padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px;
+  }
+  .q .qn { font-family: 'Barlow Semi Condensed', sans-serif; font-weight: 700; font-size: 20px; color: var(--accent); }
+  .q .qt { font-weight: 600; font-size: 15px; }
+  .q .qd { color: var(--ink-soft); font-size: 13.5px; margin-top: 3px; }
+
+  .footer-note {
+    font-size: 12.5px; color: var(--ink-soft); border-top: 1px solid var(--line); padding-top: 14px;
+  }
+
+  .docrefs { display: flex; gap: 10px; flex-wrap: wrap; }
+  .docrefs span {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--ink-soft);
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px;
+  }
+</style>
+
+<div class="nav" aria-hidden="true">
+  <a href="#s1" title="Title"></a>
+  <a href="#s2" title="Agenda"></a>
+  <a href="#s3" title="What's built"></a>
+  <a href="#s4" title="Correction"></a>
+  <a href="#s5" title="Architecture"></a>
+  <a href="#s6" title="Signing chain"></a>
+  <a href="#s7" title="SIEM &amp; provisioning"></a>
+  <a href="#s8" title="IEC 62443"></a>
+  <a href="#s9" title="Split"></a>
+  <a href="#s10" title="Questions"></a>
+  <a href="#s11" title="Next steps"></a>
+</div>
+
+<div class="deck">
+
+  <div class="deckhead">
+    <div class="brand"><strong>WNC</strong> Gateway Firmware &nbsp;×&nbsp; <strong>SVS</strong> Cloud Services</div>
+    <div class="date">2026-09-05 · Kickoff working session</div>
+  </div>
+
+  <!-- 1: Title -->
+  <section class="slide title-slide" id="s1">
+    <div class="kicker">IQ-9075 (QCS9075) AIOT Gateway — cross-department collaboration</div>
+    <h1 class="hero-title">Trust Chain<br><span class="accent">Handoff</span></h1>
+    <p class="hero-sub">Every certificate, container signature, and identity the gateway issues today
+      terminates in a cloud service. This session lines up what WNC has already built on-device
+      against what SVS needs to own so that chain holds in production.</p>
+    <div class="parties">
+      <div class="party">
+        <div class="role">Device side</div>
+        <div class="who">WNC</div>
+        <div class="what">IQ-9075 gateway firmware, TPM identity, OT/IT/DMZ zones, on-device signing enforcement</div>
+      </div>
+      <div class="party">
+        <div class="role">Cloud side</div>
+        <div class="who">SVS</div>
+        <div class="what">PKI, registry, fleet management, monitoring — largely undefined today</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2: Agenda -->
+  <section class="slide" id="s2">
+    <div class="eyebrow"><span class="num">01</span><span class="sep">/</span>Agenda</div>
+    <h2 class="title">Six things to align on today</h2>
+    <ol class="agenda">
+      <li><span class="n">01</span><span class="label">KMS, PKI/EJBCA, HSM, and key lifecycle</span></li>
+      <li class="desc">with a scoping correction — see slide 4</li>
+      <li><span class="n">02</span><span class="label">Proposed SVS cloud ↔ IQ9 gateway architecture</span></li>
+      <li class="desc">what's live, what's a gap</li>
+      <li><span class="n">03</span><span class="label">Container image signing &amp; verification trust chain</span></li>
+      <li class="desc">device half is built; cloud half — including key custody — is not</li>
+      <li><span class="n">04</span><span class="label">SIEM ingestion &amp; production-line provisioning</span></li>
+      <li class="desc">a built pipeline with no collector, and a broken factory-identity handoff</li>
+      <li><span class="n">05</span><span class="label">IEC 62443-4-2 security controls</span></li>
+      <li class="desc">CR mapping is inferred, not canonical — flagged accordingly</li>
+      <li><span class="n">06</span><span class="label">SVS / WNC responsibility split</span></li>
+      <li class="desc">a proposed line, open for this room to redraw</li>
+      <li><span class="n">07</span><span class="label">Open questions and next steps</span></li>
+    </ol>
+  </section>
+
+  <!-- 3: What's built -->
+  <section class="slide" id="s3">
+    <div class="eyebrow"><span class="num">02</span><span class="sep">/</span>Current state — device side</div>
+    <h2 class="title">What's already running and verified on-device</h2>
+    <p class="sub">Not a proposal — every row below has passed live DUT verification.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Capability</th><th>Mechanism</th><th>Evidence</th></tr></thead>
+        <tbody>
+          <tr><td>Device identity / key storage</td><td>TPM2-backed keypairs (tpm2-tss, tpm2-pkcs11) — TPM is the hardware root of trust, no discrete HSM chip</td><td class="path">kms-cert-manager.py</td></tr>
+          <tr><td>X.509 certificate issuance</td><td>On-device CSR → Vault PKI via vault-agent (AppRole) over local UDS proxy</td><td class="path">commission-flow-vault-approle-wait-fix.md — 15/15</td></tr>
+          <tr><td>SSH host / user certs</td><td>Vault SSH secrets engine; device never gains user-cert signing capability</td><td class="path">ssh-ca-user-and-host-certs-plan.md</td></tr>
+          <tr><td>mTLS telemetry channel</td><td>MQTT broker, <span class="mono">mqtt-server.csyang.org:8443</span></td><td><span class="pill good">Live 2026-09-01</span></td></tr>
+          <tr><td>Container image trust</td><td>cosign verify (baked-in public key) + rootless podman pull, gated on Vault-issued ephemeral registry creds</td><td class="path">container-ota-agent.py</td></tr>
+          <tr><td>Directory / AuthN</td><td>sssd + OpenLDAP, <span class="mono">ldaps.csyang.org</span></td><td class="path">dmz-ssh-bastion/design.md</td></tr>
+          <tr><td>Symmetric secrets at rest</td><td>TPM-sealed KEK → wrapped DEK → AES-GCM envelope</td><td class="path">SymmetricKeyManager</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="sub">Read this as: the device already <em>assumes</em> a capable, available cloud PKI/identity/registry backend. The ask is to make that assumption true in production.</p>
+  </section>
+
+  <!-- 4: Correction -->
+  <section class="slide" id="s4">
+    <div class="eyebrow"><span class="num">03</span><span class="sep">/</span>Scoping correction</div>
+    <h2 class="title">It's Vault PKI — not EJBCA</h2>
+    <div class="callout">
+      <div class="mark">!</div>
+      <div class="body">
+        The agenda lists <b>“PKI/EJBCA.”</b> There is no EJBCA anywhere in this codebase. The PKI backend
+        actually implemented and exercised end-to-end is <b>HashiCorp Vault</b> — PKI secrets engine, SSH
+        secrets engine, and KV v2 for registry credentials — reached via a local <code>vault-agent</code> proxy
+        using AppRole authentication. If SVS is independently standardizing on EJBCA, that's a real decision
+        to make explicitly now: Vault-only, EJBCA-only, or Vault-fronting-EJBCA are materially different
+        scopes of work, and getting this wrong changes what SVS staffs for.
+      </div>
+    </div>
+    <div class="grid2">
+      <div>
+        <h3 style="font-size:15px;margin-bottom:8px;">What exists</h3>
+        <ul class="plain sub" style="margin:0;">
+          <li>TPM-backed CSR generation on-device</li>
+          <li><span class="mono">vault.csyang.org</span> — PKI sign, SSH CA, KV credential store</li>
+          <li>AppRole auth via <span class="mono">vault-agent</span> UDS proxy</li>
+        </ul>
+      </div>
+      <div>
+        <h3 style="font-size:15px;margin-bottom:8px;">What doesn't</h3>
+        <ul class="plain sub" style="margin:0;">
+          <li>No EJBCA instance, config, or reference — anywhere</li>
+          <li>No confirmed production topology decision</li>
+          <li>No Vault unseal-key / root-CA escrow plan (slide 5)</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5: Architecture -->
+  <section class="slide" id="s5">
+    <div class="eyebrow"><span class="num">04</span><span class="sep">/</span>Architecture</div>
+    <h2 class="title">Proposed SVS cloud ↔ IQ-9075 gateway map</h2>
+    <p class="sub">Dashed boxes are proposed — not built on either side today.</p>
+    <div class="diagram">
+      <div class="col">
+        <h4>IQ-9075 gateway · WNC</h4>
+        <div class="node"><span class="name">kms-cert-manager</span><span class="tag">TPM keys · CSR · envelope encryption</span></div>
+        <div class="node"><span class="name">container-ota-agent</span><span class="tag">cosign verify · podman pull</span></div>
+        <div class="node"><span class="name">sssd + OpenLDAP client</span><span class="tag">directory bind</span></div>
+        <div class="node"><span class="name">TPM (hardware root)</span><span class="tag">SRK · sealed KEKs</span></div>
+      </div>
+      <div class="arrowcol">→</div>
+      <div class="col">
+        <h4>SVS cloud services</h4>
+        <div class="node"><span class="name">Vault</span><span class="tag">PKI + SSH CA + KV creds</span><span class="pill good" style="margin-top:4px;width:fit-content;">Live</span></div>
+        <div class="node"><span class="name">MQTT broker</span><span class="tag">mTLS :8443</span><span class="pill good" style="margin-top:4px;width:fit-content;">Live</span></div>
+        <div class="node"><span class="name">Signing / issuance API</span><span class="tag">IDevID · SSH cert issuance</span><span class="pill warn" style="margin-top:4px;width:fit-content;">Partial</span></div>
+        <div class="node"><span class="name">LDAP directory</span><span class="tag">ldaps</span><span class="pill warn" style="margin-top:4px;width:fit-content;">Partial</span></div>
+        <div class="node gap"><span class="name">OCI / Docker registry</span><span class="tag">◇ proposed — no config exists</span></div>
+        <div class="node gap"><span class="name">OSTree update remote</span><span class="tag">◇ proposed — base-image OTA</span></div>
+        <div class="node gap"><span class="name">DMS / fleet management</span><span class="tag">◇ proposed — inventory &amp; policy</span></div>
+        <div class="node gap"><span class="name">Monitoring / alerting</span><span class="tag">◇ proposed — nothing pages anyone today</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6: Signing chain -->
+  <section class="slide" id="s6">
+    <div class="eyebrow"><span class="num">05</span><span class="sep">/</span>Container image trust chain</div>
+    <h2 class="title">Where the chain is whole, and where it isn't</h2>
+    <div class="grid2">
+      <div>
+        <h4 style="font-family:'IBM Plex Mono',monospace;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--warn);margin-bottom:10px;">SVS side — mostly undefined</h4>
+        <div class="stepflow">
+          <div class="step gap"><span class="idx">1</span><span class="txt">Build container image</span></div>
+          <div class="step gap"><span class="idx">2</span><span class="txt"><b>cosign sign</b> — private key custody: no owner defined</span></div>
+          <div class="step gap"><span class="idx">3</span><span class="txt">Push to OCI registry — registry itself does not exist</span></div>
+        </div>
+      </div>
+      <div>
+        <h4 style="font-family:'IBM Plex Mono',monospace;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);margin-bottom:10px;">WNC side — implemented</h4>
+        <div class="stepflow">
+          <div class="step"><span class="idx">4</span><span class="txt"><b>container-ota-agent</b> receives pull command over UDS from kms-mqtt-trigger</span></div>
+          <div class="step"><span class="idx">5</span><span class="txt">Ephemeral registry creds requested from kms-cert-manager (Vault KV read)</span></div>
+          <div class="step"><span class="idx">6</span><span class="txt"><b>cosign verify --key cosign.pub</b> (transparency log check disabled)</span></div>
+          <div class="step"><span class="idx">7</span><span class="txt">podman pull by digest, only if verify passed</span></div>
+          <div class="step"><span class="idx">8</span><span class="txt">Credentials wiped (docker_logout)</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="callout" style="border-color: var(--accent); background: var(--accent-soft);">
+      <div class="mark" style="color:var(--accent);">?</div>
+      <div class="body" style="color:var(--ink);">
+        <b style="color:var(--accent-ink);">Highest-leverage open question:</b> <span class="mono">cosign.pub</span> is baked into
+        the device image at build time — there is no remote key-rotation path. Whoever holds the
+        <b style="color:var(--accent-ink);">private</b> signing key is the actual root of trust for every
+        container this fleet ever runs, and that ownership is currently undefined on either side.
+      </div>
+    </div>
+  </section>
+
+  <!-- 7: SIEM + production-line provisioning -->
+  <section class="slide" id="s7">
+    <div class="eyebrow"><span class="num">06</span><span class="sep">/</span>SIEM &amp; production-line provisioning</div>
+    <h2 class="title">Two more gaps, both already load-bearing</h2>
+    <div class="grid2">
+      <div>
+        <h4 style="font-family:'IBM Plex Mono',monospace;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--warn);margin-bottom:10px;">Log ingestion — no SIEM plugged in</h4>
+        <p class="sub" style="margin-bottom:10px;">Device pipeline is fully built: PII/secret masking, HMAC-SHA256 line integrity, disk-backed retry queue, separate 90-day audit stream, firewall-event classification. CrowdSec (host IDS) is installed.</p>
+        <div class="stepflow">
+          <div class="step gap"><span class="idx">→</span><span class="txt">TLS forward target is a build-time loopback placeholder — real endpoint <b>deliberately not shipped</b> in firmware</span></div>
+          <div class="step gap"><span class="idx">→</span><span class="txt">CrowdSec has <b>no acquisition config or notification wiring</b> — binary + service ship, nothing tells it what to watch</span></div>
+        </div>
+      </div>
+      <div>
+        <h4 style="font-family:'IBM Plex Mono',monospace;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--bad);margin-bottom:10px;">Production-line IDevID — confirmed broken</h4>
+        <p class="sub" style="margin-bottom:10px;">Manufacturing issues each device's permanent IDevID; the field-commission flow only ever consumes it. That manufacturing process is entirely external to this repo.</p>
+        <div class="stepflow">
+          <div class="step gap"><span class="idx">!</span><span class="txt">Live 2026-07-30 test: <span class="mono">provision.csyang.org</span> completes TLS but <b>rejects the MQTT connect at the app layer</b> — untrusted CA and/or unregistered device_id</span></div>
+          <div class="step gap"><span class="idx">!</span><span class="txt">Three manufacturing-enrollment design docs referenced by name in code comments <b>do not exist</b> in this repo</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="mark">!</div>
+      <div class="body">No device shipped today can complete real field commissioning until the broker trusts a manufacturing-issued IDevID CA — this is not a future risk, it is the current state. Full detail: <span class="mono">03-siem-and-production-provisioning.md</span>.</div>
+    </div>
+  </section>
+
+  <!-- 8: IEC 62443 -->
+  <section class="slide" id="s8">
+    <div class="eyebrow"><span class="num">07</span><span class="sep">/</span>IEC 62443-4-2</div>
+    <h2 class="title">Control coverage — joint scope</h2>
+    <p class="sub">CR numbers below are inferred from general IEC 62443-4-2 structure, not confirmed against a canonical CR matrix (the prior canonical file was intentionally deleted and is not being recreated). Treat as a discussion starting point, not a citation.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Service</th><th>Sub-Req (unverified)</th><th>Gap</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td>Vault PKI / SSH CA</td><td class="mono">CR 1.5, CR 1.9</td><td>No confirmed key-escrow / backup for unseal keys or root CA</td><td><span class="pill warn">Partially met</span></td></tr>
+          <tr><td>Signing / issuance API</td><td class="mono">CR 1.5, CR 3.1</td><td>Compensating control only, after a prior unauthenticated-endpoint incident</td><td><span class="pill warn">Partially met</span></td></tr>
+          <tr><td>Container image trust chain</td><td class="mono">CR 3.4, CR 7.6</td><td>No registry config; signing key custody undefined; transparency log disabled</td><td><span class="pill warn">Partially met</span></td></tr>
+          <tr><td>OTA / base image delivery</td><td class="mono">CR 3.4, CR 7.6</td><td>No live OSTree remote configured</td><td><span class="pill bad">Not met</span></td></tr>
+          <tr><td>Monitoring / alerting</td><td class="mono">CR 6.2</td><td>A prior Vault-token outage went undetected for 109 attempts</td><td><span class="pill bad">Not met</span></td></tr>
+          <tr><td>RADIUS / WPA3-Enterprise</td><td class="mono">CR 1.1, CR 1.9</td><td>Hardcoded WPA2-PSK, plaintext passphrase</td><td><span class="pill bad">Not met</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 8: Split -->
+  <section class="slide" id="s9">
+    <div class="eyebrow"><span class="num">08</span><span class="sep">/</span>Responsibility split</div>
+    <h2 class="title">A proposed line — for this room to redraw</h2>
+    <div class="split-cards">
+      <div class="owner-card wnc"><div class="owner">WNC</div><div class="item">TPM keys, on-device CSR, cosign verification enforcement</div><div class="why">Hardware/BSP-bound, kernel-adjacent</div></div>
+      <div class="owner-card wnc"><div class="owner">WNC</div><div class="item">OT/IT/DMZ zone model, per-zone key backend</div><div class="why">Physical deployment topology decision</div></div>
+      <div class="owner-card svs"><div class="owner">SVS · proposed</div><div class="item">Vault operation, HA, unsealing, key escrow</div><div class="why">Fleet-wide blast radius on failure</div></div>
+      <div class="owner-card svs"><div class="owner">SVS · proposed</div><div class="item">Signing / issuance API hardening</div><div class="why">Already had one incident; needs cloud-side ownership</div></div>
+      <div class="owner-card svs"><div class="owner">SVS · proposed — TBD</div><div class="item">Image build + signing (private key custody)</div><div class="why">Currently unowned by either team</div></div>
+      <div class="owner-card svs"><div class="owner">SVS · proposed</div><div class="item">OCI registry, OSTree update server, DMS</div><div class="why">Fleet-scale infra, not a firmware concern</div></div>
+      <div class="owner-card svs"><div class="owner">SVS · proposed</div><div class="item">Monitoring, alerting, log aggregation</div><div class="why">Needs cross-fleet correlation</div></div>
+      <div class="owner-card svs"><div class="owner">SVS · proposed</div><div class="item">RADIUS server (if WPA3-Enterprise is in scope)</div><div class="why">Device does the client side only</div></div>
+    </div>
+  </section>
+
+  <!-- 9: Open questions -->
+  <section class="slide" id="s10">
+    <div class="eyebrow"><span class="num">09</span><span class="sep">/</span>Open questions</div>
+    <h2 class="title">What we need SVS to answer</h2>
+    <div class="qbox">
+      <div class="q"><div class="qn">1</div><div><div class="qt">Is <span class="mono">csyang.org</span> the production domain?</div><div class="qd">Or a lab stand-in SVS will replace — this decides whether device-side endpoint/cert-pinning config is final.</div></div></div>
+      <div class="q"><div class="qn">2</div><div><div class="qt">Vault, EJBCA, or both?</div><div class="qd">Blocks any further PKI-related scoping — see slide 4.</div></div></div>
+      <div class="q"><div class="qn">3</div><div><div class="qt">Who signs container images?</div><div class="qd">The private cosign key's custody model is the actual root of trust for the whole OTA chain.</div></div></div>
+      <div class="q"><div class="qn">4</div><div><div class="qt">Does SVS already run an OCI registry, DMS, or monitoring stack?</div><div class="qd">Or is this greenfield build for our fleet?</div></div></div>
+      <div class="q"><div class="qn">5</div><div><div class="qt">Who owns Vault HA and key escrow?</div><div class="qd">Is this inside SVS's existing operational practice for other products?</div></div></div>
+      <div class="q"><div class="qn">6</div><div><div class="qt">Is RADIUS/WPA3-Enterprise in scope for this product?</div><div class="qd">Or is WPA2-PSK an accepted tradeoff for the target OT deployment?</div></div></div>
+      <div class="q"><div class="qn">7</div><div><div class="qt">Is a SIEM (e.g. Wazuh) already standard in SVS's stack?</div><div class="qd">Or does one need to be stood up for this product specifically — the device pipeline is ready to feed it today.</div></div></div>
+      <div class="q"><div class="qn">8</div><div><div class="qt">Where does production-line IDevID enrollment actually happen?</div><div class="qd">Who owns <span class="mono">provision.csyang.org</span>'s CA trust store — this blocks real field commissioning right now.</div></div></div>
+    </div>
+  </section>
+
+  <!-- 10: Next steps -->
+  <section class="slide" id="s11">
+    <div class="eyebrow"><span class="num">10</span><span class="sep">/</span>Next steps</div>
+    <h2 class="title">Leaving this room with</h2>
+    <ol class="agenda">
+      <li><span class="n">01</span><span class="label">SVS confirms or corrects the PKI product decision</span></li>
+      <li class="desc">before any migration work is scoped</li>
+      <li><span class="n">02</span><span class="label">Agree an owner and rough timeline per gap-table row</span></li>
+      <li class="desc">registry, OSTree remote, DMS, monitoring, key escrow, RADIUS</li>
+      <li><span class="n">03</span><span class="label">Resolve cosign private-key custody</span></li>
+      <li class="desc">the single highest-priority item — everything else in the trust chain depends on it</li>
+      <li><span class="n">04</span><span class="label">Identify the canonical IEC 62443-4-2 CR matrix owner</span></li>
+      <li class="desc">so the compliance conversation has one authoritative source</li>
+      <li><span class="n">05</span><span class="label">Fix the production-line IDevID broker-trust gap</span></li>
+      <li class="desc">confirmed broken today — every shipped device is blocked on it</li>
+      <li><span class="n">06</span><span class="label">Pick a SIEM destination and wire it to the existing log pipeline</span></li>
+      <li class="desc">the device side needs no further work — just a Target/Port/CA cert</li>
+    </ol>
+    <div class="footer-note">
+      <div class="docrefs">
+        <span>docs/svs-collaboration/01-kickoff-request-for-help.md</span>
+        <span>docs/svs-collaboration/02-joint-architecture-review.md</span>
+        <span>docs/svs-collaboration/03-siem-and-production-provisioning.md</span>
+        <span>docs/cloud-services/required-cloud-services-gap-assessment.md</span>
+      </div>
+    </div>
+  </section>
+
+</div>
