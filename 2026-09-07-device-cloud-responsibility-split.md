@@ -22,14 +22,14 @@ of the two columns.
 
 | Work item | Device team | Cloud team |
 |---|---|---|
-| Manufacturing IDevID provisioning | Owns `device-commission.py`, TPM sealing, on-device CSR generation | Owns the issuance API endpoint the device mTLS-authenticates to (currently `api.csyang.org`) |
-| Factory/MES integration | N/A --- device side is already complete | Owns building the real production-line station API (station auth, serial/model validation, batch throughput). **Needs a third stakeholder (manufacturing/ops), not just cloud dev.** |
-| LDevID commissioning (Vault AppRole) | Owns the on-device exchange logic in `device-commission.py` | Owns credentials issuance and role/policy configuration |
+| Manufacturing IDevID provisioning | Owns `device-commission.py`, TPM sealing, on-device CSR generation | Issuance API endpoint the device mTLS-authenticates to (currently `api.csyang.org`) |
+| Factory/MES integration | N/A --- device side is already complete | Building the real production-line station API (station auth, serial/model validation, batch throughput). **Needs a third stakeholder (manufacturing/ops), not just cloud dev.** |
+| LDevID commissioning (Vault AppRole) | Owns the on-device exchange logic in `device-commission.py` | Credentials issuance and role/policy configuration |
 | Cert rotation / renewal (`kms-cert-manager`) | Owns the daemon, UDS socket, TPM-backed key operations |  Signing the certificate based on the CSR |
 | OCSP/CRL revocation checking | Owns adding a revocation-check call into `kms-cert-manager` before trusting a cert | Owns standing up the OCSP responder / CRL distribution point in front of Vault |
-| CLM/CKM two-plane split, HSM Cluster, KEK controls | None --- this is cloud/infra architecture | Owns HSM procurement/integration, splitting cert-lifecycle logic from crypto-ops logic, KEK policy |
-| Certificate Policy Engine + Certificate Inventory | Emits cert metadata/telemetry the cloud side can ingest | Owns the inventory database and policy engine |
-| Remote CA issuance server + portal for DUT access certs (RBAC) | Owns client-side trust config, consuming a signed cert once issued | Owns the CA signing service, the portal UI, and RBAC policy for who can request/approve a cert |
+| CLM/CKM two-plane split, HSM Cluster, KEK controls | None --- this is cloud/infra architecture | HSM procurement/integration, splitting cert-lifecycle logic from crypto-ops logic, KEK policy (HSM is for FIP140-3) |
+| Certificate Policy Engine + Certificate Inventory | Emits cert metadata/telemetry the cloud side can ingest | Inventory database and policy engine |
+| Remote CA issuance server + portal for DUT access certs (RBAC) | Owns client-side trust config, consuming a signed cert once issued | CA signing service, the portal UI, and RBAC policy for who can request/approve a cert |
 | Security Administration (dual approval, HSM health monitoring) | None | Fully cloud/ops governance |
 
 # 2. AAA (Wi-Fi + SSH)
