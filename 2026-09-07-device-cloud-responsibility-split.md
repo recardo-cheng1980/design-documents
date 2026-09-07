@@ -37,12 +37,8 @@ of the two columns.
 | Security event / log forwarding | Owns wiring rsyslog/journald (or adding a Wazuh agent) to forward off-device | Owns the SIEM/log collector receiving it |
 | Metrics / health / heartbeat to cloud | Owns extending `ha-metrics` (currently loopback-only) to emit outward | Owns the Monitoring/Alerting service and dashboards |
 | Protocol decision (stay CWMP vs. move to USP) | Provides input on the cost of replacing the working `CcspTr069Pa` stack | Owns the ACS/DMS platform decision and the device-management portal. **Needs explicit sign-off from the target-design owner --- this changes the target, not just the implementation plan.** |
-
-# 3. Container Supply Chain & Firmware OTA
-| Work item | Device team | Cloud team |
-|---|---|---|
-| Container signature verification | Done --- `cosign`, `container-ota-agent.py` | Owns publishing signed images to whatever registry is chosen |
+| Container signature verification | Container Signature Verification | Owns publishing signed images to whatever registry is chosen |
 | Registry decision (ACR vs. registry-agnostic OCI) | Consumes whichever registry API is decided | Owns the decision and the CI/CD build-sign-push pipeline. **Flag vendor lock-in risk before committing to ACR literally.** |
-| MQTT vs. TR-069 trigger decision | Owns whichever client path is chosen (`kms-mqtt-trigger` exists; `CcspTr069Pa` exists but unwired to containers) | Owns the ACS/MQTT-broker side of whichever path is chosen, plus status-reporting ingestion |
+| TR-369 vs. TR-069 trigger decision container OTA triggering | Owns whichever client path is chosen | Owns the ACS/MQTT-broker side of whichever path is chosen, plus status-reporting ingestion |
 | OTA firmware repository / distribution | Owns OSTree pull/verify logic (already built) | Owns hosting the OSTree remote and its transport security (mTLS/HTTPS) |
 | Cloud MQTT Broker | Owns client integration only | Fully cloud infra --- broker, mTLS termination, topic ACLs |
