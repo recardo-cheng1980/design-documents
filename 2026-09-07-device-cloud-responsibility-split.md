@@ -33,7 +33,7 @@ of the two columns.
 | Security Administration (dual approval, HSM health monitoring) | None | Fully cloud/ops governance |
 | WPA3-Enterprise enable | Replacing the shared secret mechanism | Owns standing up / exposing the actual cloud RADIUS server |
 | RADIUS forward vs. local terminate | Owns repointing from `127.0.0.1` to the cloud server, removing local FreeRADIUS EAP termination | Owns the cloud RADIUS server's EAP-TLS/PEAP configuration and accounting |
-| Multiple LDAPS servers (itns/dmzns) + Azure migration | Owns per-namespace SSSD configuration, once namespaces exist (blocked on §4) | Owns standing up multiple LDAPS endpoints and the Azure AD/Entra migration itself |
+| Multiple LDAPS servers (itns/dmzns) + Azure migration | Owns per-namespace SSSD configuration, once namespaces exist | Owns standing up multiple LDAPS endpoints and the Azure AD/Entra migration itself |
 | Security event / log forwarding | Owns wiring rsyslog/journald (or adding a Wazuh agent) to forward off-device | Owns the SIEM/log collector receiving it |
 | Metrics / health / heartbeat to cloud |  Emit related metrics/hearbeat outward | Owns the Monitoring/Alerting service and dashboards |
 | Protocol decision (stay CWMP vs. move to USP) | Provides input on the cost of replacing the working `CcspTr069Pa` stack | Owns the ACS/DMS platform decision and the device-management portal. **Needs explicit sign-off from the target-design owner --- this changes the target, not just the implementation plan.** |
