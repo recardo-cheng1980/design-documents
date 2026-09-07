@@ -22,7 +22,7 @@ of the two columns.
 
 | Work item | Device team | Cloud team |
 |---|---|---|
-| Manufacturing IDevID provisioning | Owns `device-commission.py`, TPM sealing, on-device CSR generation | Issuance API endpoint the device mTLS-authenticates to (currently `api.csyang.org`) |
+| Manufacturing IDevID provisioning | Device comissioning service, TPM sealing, on-device CSR generation | Issuance API endpoint the device mTLS-authenticates to (currently `api.csyang.org`) |
 | Factory/MES integration | N/A --- device side is already complete | Building the real production-line station API (station auth, serial/model validation, batch throughput). **Needs a third stakeholder (manufacturing/ops), not just cloud dev.** |
 | LDevID commissioning (Vault AppRole) | Owns the on-device exchange logic in `device-commission.py` | Credentials issuance and role/policy configuration |
 | Cert rotation / renewal (`kms-cert-manager`) | Owns the daemon, UDS socket, TPM-backed key operations |  Signing the certificate based on the CSR |
@@ -36,10 +36,9 @@ of the two columns.
 | Multiple LDAPS servers (itns/dmzns) + Azure migration | Owns per-namespace SSSD configuration, once namespaces exist (blocked on §4) | Owns standing up multiple LDAPS endpoints and the Azure AD/Entra migration itself |
 | Security event / log forwarding | Owns wiring rsyslog/journald (or adding a Wazuh agent) to forward off-device | Owns the SIEM/log collector receiving it |
 | Metrics / health / heartbeat to cloud | Owns extending `ha-metrics` (currently loopback-only) to emit outward | Owns the Monitoring/Alerting service and dashboards |
-| Fleet Analytics, Backup/Disaster Recovery | None | Fully cloud/ops |
 | Protocol decision (stay CWMP vs. move to USP) | Provides input on the cost of replacing the working `CcspTr069Pa` stack | Owns the ACS/DMS platform decision and the device-management portal. **Needs explicit sign-off from the target-design owner --- this changes the target, not just the implementation plan.** |
-# 3. Container Supply Chain & Firmware OTA
 
+# 3. Container Supply Chain & Firmware OTA
 | Work item | Device team | Cloud team |
 |---|---|---|
 | Container signature verification | Done --- `cosign`, `container-ota-agent.py` | Owns publishing signed images to whatever registry is chosen |
@@ -47,35 +46,3 @@ of the two columns.
 | MQTT vs. TR-069 trigger decision | Owns whichever client path is chosen (`kms-mqtt-trigger` exists; `CcspTr069Pa` exists but unwired to containers) | Owns the ACS/MQTT-broker side of whichever path is chosen, plus status-reporting ingestion |
 | OTA firmware repository / distribution | Owns OSTree pull/verify logic (already built) | Owns hosting the OSTree remote and its transport security (mTLS/HTTPS) |
 | Cloud MQTT Broker | Owns client integration only | Fully cloud infra --- broker, mTLS termination, topic ACLs |
-
-# 4. Logging, Monitoring, SIEM
-
-| Work item | Device team | Cloud team |
-|---|---|---|
-| Security event / log forwarding | Owns wiring rsyslog/journald (or adding a Wazuh agent) to forward off-device | Owns the SIEM/log collector receiving it |
-| Metrics / health / heartbeat to cloud | Owns extending `ha-metrics` (currently loopback-only) to emit outward | Owns the Monitoring/Alerting service and dashboards |
-| Fleet Analytics, Backup/Disaster Recovery | None | Fully cloud/ops |
-
-# 5. Device Management Protocol (TR-069 → TR-369)
-
-| Work item | Device team | Cloud team |
-|---|---|---|
-| Protocol decision (stay CWMP vs. move to USP) | Provides input on the cost of replacing the working `CcspTr069Pa` stack | Owns the ACS/DMS platform decision and the device-management portal. **Needs explicit sign-off from the target-design owner --- this changes the target, not just the implementation plan.** |
-
-# 6. Cross-team interface contracts (blocking dependencies)
-
-These are the interfaces that must be agreed before either side can
-build independently of the other:
-
-1. CSR/cert issuance & revocation-status API shape (§1)
-2. RADIUS forwarding target + shared-secret provisioning process (§2)
-3. MQTT topic/message schema for OTA triggers and telemetry (§3, §5)
-4. Registry credential/auth contract, whichever registry is chosen (§3)
-5. Namespace-to-cloud-endpoint mapping (§4)
-6. TR-069 vs. TR-369 parameter data model, if that decision is made (§6)
-
-# 7. Sources
-
-Companion document: `2026-09-07-target-architecture-gap-analysis.md`,
-which this matrix is derived from item-for-item. No new gap claims are
-introduced here beyond that document's findings.
