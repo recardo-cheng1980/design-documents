@@ -31,17 +31,13 @@ of the two columns.
 | Certificate Policy Engine + Certificate Inventory | Emits cert metadata/telemetry the cloud side can ingest | Inventory database and policy engine |
 | Remote CA issuance server + portal for DUT access certs (RBAC) | Owns client-side trust config, consuming a signed cert once issued | CA signing service, the portal UI, and RBAC policy for who can request/approve a cert |
 | Security Administration (dual approval, HSM health monitoring) | None | Fully cloud/ops governance |
-
-# 2. AAA (Wi-Fi + SSH)
-
-| Work item | Device team | Cloud team |
-|---|---|---|
-| WPA3-Enterprise enable | Owns flipping the cipher line in `hostapd-enterprise.conf.template`, replacing the shared secret | Owns standing up / exposing the actual cloud RADIUS server |
-| RADIUS forward vs. local terminate | Owns repointing `hostapd-radius.conf.inc` from `127.0.0.1` to the cloud server, removing local FreeRADIUS EAP termination | Owns the cloud RADIUS server's EAP-TLS/PEAP configuration and accounting |
-| SSH regression fix (cert-only / root-disabled) | Fully device team --- restore the retired build-time toggle and `40-sysadmin-cert-only.conf` | None |
-| LDAP bind credential hygiene | Owns swapping the hardcoded bind password for a scoped service-account credential | Owns provisioning that read-only service account in the directory |
+| WPA3-Enterprise enable | Replacing the shared secret mechanism | Owns standing up / exposing the actual cloud RADIUS server |
+| RADIUS forward vs. local terminate | Owns repointing from `127.0.0.1` to the cloud server, removing local FreeRADIUS EAP termination | Owns the cloud RADIUS server's EAP-TLS/PEAP configuration and accounting |
 | Multiple LDAPS servers (itns/dmzns) + Azure migration | Owns per-namespace SSSD configuration, once namespaces exist (blocked on §4) | Owns standing up multiple LDAPS endpoints and the Azure AD/Entra migration itself |
-
+| Security event / log forwarding | Owns wiring rsyslog/journald (or adding a Wazuh agent) to forward off-device | Owns the SIEM/log collector receiving it |
+| Metrics / health / heartbeat to cloud | Owns extending `ha-metrics` (currently loopback-only) to emit outward | Owns the Monitoring/Alerting service and dashboards |
+| Fleet Analytics, Backup/Disaster Recovery | None | Fully cloud/ops |
+| Protocol decision (stay CWMP vs. move to USP) | Provides input on the cost of replacing the working `CcspTr069Pa` stack | Owns the ACS/DMS platform decision and the device-management portal. **Needs explicit sign-off from the target-design owner --- this changes the target, not just the implementation plan.** |
 # 3. Container Supply Chain & Firmware OTA
 
 | Work item | Device team | Cloud team |
