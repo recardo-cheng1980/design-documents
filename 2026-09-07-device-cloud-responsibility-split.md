@@ -23,7 +23,7 @@ of the two columns.
 | Work item | Device team | Cloud team |
 |---|---|---|
 | Manufacturing IDevID provisioning | Device comissioning service, TPM sealing, on-device CSR generation | Issuance API endpoint the device mTLS-authenticates to (currently `api.csyang.org`) |
-| Factory/MES integration | N/A --- device side is already complete | Building the real production-line station API (station auth, serial/model validation, batch throughput). **Needs a third stakeholder (manufacturing/ops), not just cloud dev.** |
+| Factory/MES integration | Provide IDevID and related-manufactoring data injection method | Building the real production-line station API (station auth, serial/model validation, batch throughput). **Needs a third stakeholder (manufacturing/ops), not just cloud dev.** |
 | LDevID commissioning  | Owns the on-device exchange logic | Credentials issuance and role/policy configuration |
 | Cert rotation / renewal | Owns the daemon, UDS socket, TPM-backed key operations |  Signing the certificate based on the CSR |
 | OCSP/CRL revocation checking | Owns adding a revocation-check call before trusting a cert | Owns standing up the OCSP responder / CRL distribution point in front of Vault |
@@ -36,7 +36,7 @@ of the two columns.
 | Multiple LDAPS servers (itns/dmzns) + Azure migration | Owns per-namespace SSSD configuration, once namespaces exist | Owns standing up multiple LDAPS endpoints and the Azure AD/Entra migration itself |
 | Security event / log forwarding | Owns wiring rsyslog/journald (or adding a Wazuh agent) to forward off-device | Owns the SIEM/log collector receiving it |
 | Metrics / health / heartbeat to cloud |  Emit related metrics/hearbeat outward | Owns the Monitoring/Alerting service and dashboards |
-| Protocol decision (stay CWMP vs. move to USP) | Provides input on the cost of replacing the working `CcspTr069Pa` stack | Owns the ACS/DMS platform decision and the device-management portal. **Needs explicit sign-off from the target-design owner --- this changes the target, not just the implementation plan.** |
+| Protocol decision (stay CWMP vs. move to USP) | Provides CWMP to USP device migration | Owns the ACS/DMS platform implementation and the device-management portal. |
 | Container signature verification | Container Signature Verification | Owns publishing signed images to whatever registry is chosen |
 | Registry decision (ACR vs. registry-agnostic OCI) | Consumes whichever registry API is decided | Owns the decision and the CI/CD build-sign-push pipeline. **Flag vendor lock-in risk before committing to ACR literally.** |
 | TR-369 vs. TR-069 trigger decision container OTA triggering | Owns whichever client path is chosen | Owns the ACS/MQTT-broker side of whichever path is chosen, plus status-reporting ingestion |
