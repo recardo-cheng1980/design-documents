@@ -31,7 +31,7 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 
 - Protect audit logs, system time, CA trust and private-key material.
 
-- Produce deterministic, attributable audit records for every privileged operation.
+- Produce deterministic, attributable audit records for every operation.
 
 ### 1.3 Non goals
 
