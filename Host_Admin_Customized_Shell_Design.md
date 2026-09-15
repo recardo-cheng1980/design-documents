@@ -4,14 +4,14 @@ _IT OT Separation SSHD RBAC_
 
 | **Document status** | Design baseline   |
 |---------------------|-------------------|
-| **Version**         | 1.2               |
+| **Version**         | 1.3               |
 | **Date**            | 15 September 2026 |
 | **Role**            | host-admin        |
 | **Target plane**    | DUT Host plane    |
 
 **Decision summary.** The host-admin receives a forced, allowlist-based administration shell on the Host plane. The role can manage approved Host networking, accounts, services, RDK-B parameters, approved Host configuration and Host certificates. It can harvest logs and inspect redacted configuration from ITns, OTns and DMZns, but cannot modify those namespaces.
 
-Delivery uses two phases while preserving one command grammar, one policy model and one audit schema. Phase 1 uses the unprivileged customized shell with one root-owned privileged helper. Phase 2 replaces that execution path with one confined UNIX-socket broker. Approved Host configuration may be edited with restricted Vim only on a user-owned staging copy; the helper or broker independently validates and atomically installs it. Neither phase provides an unrestricted root shell.
+Delivery uses two phases while preserving one command grammar, one policy model and one audit schema. Phase 1 uses the unprivileged customized shell with one root-owned privileged helper. Phase 2 replaces that execution path with one confined UNIX-socket broker. Approved Host configuration may be edited with restricted Vim only on a user-owned staging copy; the helper or broker independently validates and atomically installs it. Neither phase provides an unrestricted root shell. Before every command, the shell prompt displays the verified human username, mapped local account and current system time in UTC.
 
 ## 1 Purpose and Scope
 
@@ -36,6 +36,8 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 - Deliver Phase 1 with one privileged helper and migrate to the Phase 2 broker without changing the user command grammar, role permissions or audit schema.
 
 - Permit restricted Vim editing only for approved Host configuration IDs through a validated staging workflow.
+
+- Display the authenticated human username, mapped local identity and freshly read UTC system time in every command prompt.
 
 ### 1.3 Non goals
 
@@ -65,6 +67,7 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 | D9 | Protected evidence | Logs and time are readable but immutable to host-admin. Malformed, denied, successful and failed requests are audited. |
 | D10 | Constrained certificate renewal | host-admin may renew the fixed Host-plane device certificate, but cannot choose identity, CA role, principal, TTL or key export behavior. |
 | D11 | Stable migration contract | Command syntax, action IDs, validators, role policy, event IDs and audit fields remain compatible across both phases. |
+| D12 | Trusted prompt identity and time | Every prompt displays the verified human username, mapped local account and current UTC system time. Values come from trusted session and system sources and cannot be supplied by the user. |
 
 *Table 1 Core design decisions*
 
@@ -112,7 +115,7 @@ flowchart TD
 | **Component** | **Phase** | **Responsibility** |
 |---------------|-----------|--------------------|
 | Host SSHD | Both | Authenticates the Host-plane SSH certificate and starts the approved existing session path. This document does not modify SSHD configuration. |
-| host-admin-shell | Both | Unprivileged front end. Displays help, parses exact syntax, creates canonical actions, manages staging interaction and returns bounded results. |
+| host-admin-shell | Both | Unprivileged front end. Displays verified identity and current UTC time, displays help, parses exact syntax, creates canonical actions, manages staging interaction and returns bounded results. |
 | host-admin-helper | Phase 1 | Single root-owned privileged executable. Revalidates identity, role, action and parameters and dispatches one internal handler. It accepts no arbitrary command. |
 | host-admin-brokerd | Phase 2 | Privileged policy enforcement point. Verifies UNIX peer credentials, resolves server-side authorization, enforces limits and dispatches handlers. |
 | Host action handlers | Both | Internal modules that implement network, firewall, account, service, RDK-B, diagnostics and approved Host configuration transactions; they are not user-selectable executables. |
@@ -123,23 +126,28 @@ flowchart TD
 
 *Table 2 Component responsibilities*
 
+
 ### 3.3 Common authorization flow
 
 1. Host SSHD validates the Host-plane user certificate and device-bound principal host-admin@kms-<device-id> using the approved current SSHD configuration.
 
 2. SSHD maps the session to the locked local account hostadmin and starts the customized shell.
 
-3. The shell records SSH context and parses one permitted command without invoking /bin/sh.
+3. The shell obtains the verified human account from authenticated session context and the mapped local account and numeric UID from protected identity mapping. These values are not read from user command input or user-controlled environment variables.
 
-4. The shell converts the command into a canonical action containing an action ID and typed parameters. The request cannot select a role, executable or arbitrary filesystem path.
+4. Before accepting each command, the shell freshly reads the system clock, converts it to UTC and renders the fixed prompt format defined in Section 5.1.
 
-5. In Phase 1, the single helper derives the original authenticated UID from the protected invocation context and resolves the server-owned role policy. In Phase 2, the broker derives the UID from UNIX peer credentials and resolves the same policy.
+5. The shell records SSH context and parses one permitted command without invoking /bin/sh.
 
-6. The selected handler independently validates resource IDs, candidate files, values, limits and protected invariants before performing an operation.
+6. The shell converts the command into a canonical action containing an action ID and typed parameters. The request cannot select a role, identity, executable or arbitrary filesystem path.
 
-7. The trusted audit path records the authorization decision, operation result and applicable before/after state, hashes and rollback status.
+7. In Phase 1, the single helper derives the original authenticated UID from the protected invocation context and resolves the server-owned role policy. In Phase 2, the broker derives the UID from UNIX peer credentials and resolves the same policy.
 
-8. The shell returns bounded, sanitized output to the administrator.
+8. The selected handler independently validates resource IDs, candidate files, values, limits and protected invariants before performing an operation.
+
+9. The trusted audit path independently generates its own event timestamp and records the authorization decision, operation result and applicable before/after state, hashes and rollback status.
+
+10. After the result is returned, the shell reads the clock again and displays a new prompt with the same verified identity and updated UTC time.
 
 ## 4 Host Admin Permission Model
 
@@ -183,6 +191,28 @@ flowchart TD
 ## 5 Command Interface
 
 The shell exposes a namespaced command grammar. The parser accepts only documented tokens and option combinations. Unknown verbs, duplicate options, invalid identifiers, unsupported values, overlong input and shell metacharacters are rejected before privileged execution. The same syntax is mandatory in both phases.
+
+### 5.1 Shell prompt
+
+The prompt shall display both the verified human account and mapped local account because multiple human administrators may terminate as the same local hostadmin identity. It shall also display the current system time in UTC. The fixed format is:
+
+~~~text
+<human-account>(<local-account>:<uid>) [<UTC-RFC3339-time>] hostctl>
+~~~
+
+Example:
+
+~~~text
+hostadmin01(hostadmin:10000) [2026-09-15T08:42:17Z] hostctl>
+~~~
+
+The timestamp is a prompt-time snapshot. It is refreshed immediately before every prompt, including after a command completes, fails or is denied, but it does not tick or redraw while the administrator is typing. Seconds are required; sub-second precision is optional for the interactive prompt but remains required for audit records. The literal Z timezone marker is required so the displayed time cannot be confused with local time.
+
+The human account, local account and UID shall be obtained from authenticated session context and protected identity mapping. User input, environment variables, terminal escape sequences and configuration-editor content cannot override them. Prompt fields shall use a restricted character set and fixed formatting so account data cannot inject terminal control characters.
+
+The displayed timestamp is informational and shall not be copied into the audit record. The protected audit path independently reads the system UTC clock when creating each event. host-admin may view clock synchronization status through hostctl time status but cannot set time, timezone or the time source.
+
+### 5.2 Command grammar
 
 ~~~text
 hostctl network status
@@ -348,6 +378,7 @@ Certificate renewal is limited to the DUT Host-plane certificate. The handler de
 | **Threat** | **Failure mode** | **Required control** |
 |------------|------------------|----------------------|
 | Shell escape | Pipes, redirection, substitution or interpreter execution reaches arbitrary commands. | No POSIX shell evaluation; exact grammar; no raw executable action; bounded output and fixed PAGER behavior. |
+| Prompt spoofing | User-controlled identity, environment or control characters make the prompt show a false username or misleading time. | Identity from authenticated context, time from system UTC clock, restricted field character set, fixed formatting and no user overrides. |
 | Editor escape | Vim escape or alternate-file commands bypass the customized-shell interface. | Restricted Vim on the candidate only, permanent unprivileged UID, dedicated SELinux editor domain, clean environment and independent helper/broker authorization. |
 | Privileged editor | Vim or another general editor executes with elevated privilege. | Explicitly prohibited; the privileged backend prepares and applies, while the editor runs only as the authenticated user. |
 | Helper abuse | A user invokes the Phase 1 helper outside the intended UI or supplies a hidden command. | One fixed helper, no exec/run-shell action, server-owned action table, independent role and parameter validation and protected audit. |
@@ -402,6 +433,8 @@ Certificate renewal is limited to the DUT Host-plane certificate. The handler de
 
 The audit pipeline records attempts as well as successful operations. The shell emits a sanitized request or rejection event; the Phase 1 helper or Phase 2 broker emits authorization, state-change and completion records. Records use the system UTC clock, which host-admin cannot change, and should be forwarded to a remote collector when available.
 
+The prompt timestamp and audit timestamp are separate reads of the same protected system clock. The prompt is user feedback; it is not audit evidence and cannot be submitted back as an event timestamp.
+
 ### 8.1 Per-user command log
 
 Every command execution attempt, including malformed, unauthorized, denied, successful and failed commands, shall be logged in `/var/log/custom-shell/${role}-${uid}.log`. The shell and privileged execution backend shall derive role and UID from the authenticated session and protected server-side identity mapping; neither value may be supplied or overridden by the user. For the host-admin account defined by this design, UID 10000 therefore writes to `/var/log/custom-shell/host-admin-10000.log`.
@@ -451,6 +484,11 @@ execution:
   phase: phase1-helper
   helper: /usr/libexec/host-admin-helper
   broker_socket: /run/custom-shell/host-admin-broker.sock
+display:
+  prompt_identity: human-and-local
+  prompt_uid: true
+  prompt_time: utc-rfc3339-seconds
+  refresh: before-every-prompt
 permissions:
   host_network: constrained-write
   host_firewall: validated-transaction
@@ -481,6 +519,8 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 
 | **Condition** | **Required behavior** |
 |---------------|-----------------------|
+| Identity mapping unavailable or inconsistent | Do not present an administrative prompt or permit state-changing actions; record a protected authentication/session failure. |
+| System clock read or UTC conversion fails | Do not present a misleading timestamp; display a fixed time-unavailable error, audit the condition and fail closed for state-changing operations. |
 | Invalid syntax or unknown command | Reject locally, show relevant usage and submit a sanitized rejection audit event. |
 | Authorization denial | Return a generic permission error; record the policy rule and detailed reason only in protected audit data. |
 | Edit cancelled or Vim terminated | Leave the protected target unchanged; retain or discard the candidate according to transaction policy and audit the outcome. |
@@ -506,6 +546,10 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 | AUTH-02 | A DMZNS-only, wrong-plane, wrong-role, expired or wrong-device certificate is rejected by Host SSHD. | Pass |
 | SHELL-01 | bash, sh, user-facing sudo, su, pipes, redirection, command substitution and interpreter execution are rejected and audited. | Pass |
 | SHELL-02 | Unknown commands, options, duplicate options and overlong input are rejected before privileged execution. | Pass |
+| UI-01 | Every prompt displays the verified human account, mapped local account, numeric UID and UTC time using the fixed format. | Pass |
+| UI-02 | The displayed UTC time is refreshed before each prompt after successful, failed and denied commands, and remains a stable snapshot without redrawing active input. | Pass |
+| UI-03 | User commands, environment variables, terminal control characters and staged configuration content cannot alter or spoof prompt identity or time. | Pass |
+| UI-04 | The prompt timestamp is not trusted as the audit timestamp; audit events independently obtain UTC RFC 3339 timestamps with sub-second precision. | Pass |
 | PHASE-01 | Phase 1 uses exactly one privileged helper; direct invocation cannot exceed the same host-admin action policy. | Pass |
 | PHASE-02 | Phase 2 uses broker peer credentials and the same command, action, policy and audit schemas; it does not silently fall back to the helper. | Pass |
 | CFG-01 | Only approved Host config IDs can create an edit transaction; raw paths and namespace write targets are rejected. | Pass |
@@ -537,7 +581,7 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 
 | **Work product** | **Phase** | **Required content** |
 |------------------|-----------|----------------------|
-| Shell | Both | /usr/libexec/sshd-rbac-shell with host-admin grammar, canonical action construction, help, edit orchestration and bounded output. |
+| Shell | Both | /usr/libexec/sshd-rbac-shell with trusted username/current-time prompt, host-admin grammar, canonical action construction, help, edit orchestration and bounded output. |
 | Privileged helper | Phase 1 | /usr/libexec/host-admin-helper as one root-owned executable with server-side policy, independent validation, internal handler dispatch and protected audit. |
 | Broker | Phase 2 | host-admin-brokerd UNIX-socket service with peer-credential validation, the same canonical action schema and handler dispatch. |
 | Configuration workflow | Both | Config-ID catalog, protected transaction metadata, user-owned staging copy, restricted Vim profile, validators, backup, atomic apply, health check and rollback. |
@@ -560,6 +604,8 @@ The following values are deployment policy, not architecture changes. They must 
 - Allowlisted Host services and the health check for each service.
 
 - Permitted Host configuration IDs, destination mappings, protected directives and validators, including SSHD and SSSD activation and rollback rules.
+
+- Prompt identity source and authenticated human-to-local mapping, fixed character set, UTC rendering and clock-failure behavior.
 
 - Restricted Vim package availability, root-owned profile, disabled features and staging transaction lifetime.
 
