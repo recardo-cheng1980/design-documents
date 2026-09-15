@@ -4,14 +4,14 @@ _IT OT Separation SSHD RBAC_
 
 | **Document status** | Design baseline   |
 |---------------------|-------------------|
-| **Version**         | 1.9               |
+| **Version**         | 2.0               |
 | **Date**            | 15 September 2026 |
 | **Role**            | host-admin        |
 | **Target plane**    | DUT Host plane    |
 
 **Decision summary.** The host-admin receives a forced, allowlist-based administration shell on the Host plane. The role can manage approved Host networking, accounts, services, RDK-B parameters, approved Host configuration and Host certificates. It can harvest logs and inspect redacted configuration from ITns, OTns and DMZns, but cannot modify those namespaces.
 
-Delivery uses two phases while preserving one command grammar, one policy model and one audit schema. Phase 1 uses the unprivileged customized shell with one root-owned privileged helper. Phase 2 replaces that execution path with one confined UNIX-socket broker. Approved Host configuration may be edited with restricted Vim only on a user-owned staging copy; the helper or broker independently validates and atomically installs it. Neither phase provides an unrestricted root shell. At login and whenever the prompt is redisplayed, the shell shows only the mapped local account, numeric UID and current system time in UTC with minute precision. The time does not tick while the shell waits for input.
+Delivery uses two phases while preserving one command grammar, one policy model and one audit schema. Phase 1 uses the unprivileged customized shell with one root-owned privileged helper. Phase 2 replaces that execution path with one confined UNIX-socket broker. Approved Host configuration may be edited with restricted Vim only on a user-owned staging copy; the helper or broker independently validates and atomically installs it. Neither phase provides an unrestricted root shell. At login and whenever the prompt is redisplayed, the shell shows only the mapped local account, numeric UID and current system time in UTC with minute precision. The time does not tick while the shell waits for input. Every command audit record includes the trusted credential ID and mapped local account used for the session.
 
 ## 1 Purpose and Scope
 
@@ -32,6 +32,8 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 - Protect audit logs, system time, CA trust and private-key material.
 
 - Produce deterministic, attributable audit records for every operation.
+
+- Include a trusted, non-secret credential_id and the mapped local_account in every command audit record.
 
 - Deliver Phase 1 with one privileged helper and migrate to the Phase 2 broker without changing the user command grammar, role permissions or audit schema.
 
@@ -70,6 +72,7 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 | D12 | Trusted prompt identity and time | The prompt displays only the mapped local account, numeric UID and current UTC system time with minute precision. It refreshes at login, after Enter is submitted and after command completion; it does not tick while input is active. Values come from trusted sources and cannot be supplied by the user. The human account remains in protected audit data only. |
 | D13 | Configuration-edit-first gate | Phase 1 implements and accepts the complete Host configuration edit transaction before enabling other state-changing Phase 1 domains. |
 | D14 | One shell entry point per role | host-admin, it-admin, ot-admin, dmz-admin, auditor and ot-operator each receive a distinct customized-shell executable and grammar. Common implementation code may be shared, but role selection and authorization are never derived solely from an executable name or user input. |
+| D15 | Credential-attributed audit trail | Every command audit record contains source.credential_id and source.local_account from a protected session context. The credential ID identifies the credential accepted by the login-plane SSHD and never contains a password, token, private key or user-supplied value. |
 
 *Table 1 Core design decisions*
 
@@ -135,7 +138,7 @@ flowchart TD
 
 2. SSHD maps the session to the locked local account hostadmin and starts the customized shell.
 
-3. The shell obtains the mapped local account and numeric UID from protected identity mapping for the visible prompt. It separately retains the verified human account from authenticated session context for protected audit records. None of these values are read from user command input or user-controlled environment variables.
+3. A protected session initializer binds the accepted authentication credential, mapped local account, numeric UID, verified human account, role, plane and SSH session identity into an integrity-protected session context. The shell obtains only the mapped local account and UID from that context for the visible prompt; the audit path resolves source.credential_id, source.local_account and the other attribution fields from the same protected context. None of these values are read from user command input or user-controlled environment variables.
 
 4. At initial login, the shell reads the system clock, converts it to UTC minute precision and renders the fixed prompt format defined in Section 5.1.
 
@@ -600,14 +603,17 @@ The prompt timestamp and audit timestamp are separate reads of the same protecte
 
 ### 8.1 Per-user command log
 
-Every command execution attempt, including malformed, unauthorized, denied, successful and failed commands, shall be logged in `/var/log/custom-shell/${role}-${uid}.log`. The shell and privileged execution backend shall derive role and UID from the authenticated session and protected server-side identity mapping; neither value may be supplied or overridden by the user. For the host-admin account defined by this design, UID 10000 therefore writes to `/var/log/custom-shell/host-admin-10000.log`.
+Every command execution attempt, including malformed, unauthorized, denied, successful and failed commands, shall be logged in `/var/log/custom-shell/${role}-${uid}.log`. Every record shall contain `source.credential_id`, `source.local_account` and `source.uid`. The shell and privileged execution backend shall derive these fields, role and UID from the authenticated session and protected server-side identity mapping; none may be supplied or overridden by the user. For the host-admin account defined by this design, UID 10000 therefore writes to `/var/log/custom-shell/host-admin-10000.log`.
 
 The file shall use JSON Lines format with one complete audit record per line. A completion record shall be written after command processing so that event_result reflects the final outcome. A failed event shall include a non-secret failed_reason that is specific enough for operations and investigation; a successful event shall omit failed_reason or set it to null.
 
-| **Field**    | **Required content**                                                                                                              |
-|--------------|-----------------------------------------------------------------------------------------------------------------------------------|
-| timestamp    | UTC RFC 3339 timestamp with timezone and sub-second precision.                                                                    |
-| source       | Human user account, mapped local account and numeric UID that initiated the command.                                              |
+| **Field**            | **Required content**                                                                                                              |
+|----------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| timestamp            | UTC RFC 3339 timestamp with timezone and sub-second precision.                                                                    |
+| source.credential_id | Trusted, non-secret identifier of the credential accepted for this plane's SSH session.                                            |
+| source.local_account | Mapped local account that executed the customized shell.                                                                          |
+| source.uid           | Numeric UID resolved from the protected local-account mapping.                                                                     |
+| source.human_account | Verified human account when available from the protected authentication chain; never accepted from command input.                  |
 | category     | Controlled classification such as network, firewall, service, account, rdkb, logs, namespace-config, time, certificate or system. |
 | type         | Controlled event type, for example command.completed, command.denied or command.failed.                                           |
 | event ID     | Unique event_id for the individual record; correlation_id links records in one session or operation.                              |
@@ -622,7 +628,7 @@ The /var/log/custom-shell directory shall be owned by root or the dedicated audi
 |------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
 | Event identity   | event_id, type, correlation_id and schema_version                                                                                              |
 | Time             | timestamp in UTC RFC 3339 format, monotonic duration and boot_id                                                                               |
-| Source           | human user account, mapped local account, numeric UID, role and online or offline authentication path                                          |
+| Source           | credential_id, human user account, mapped local_account, numeric UID, role and online or offline authentication path                            |
 | Classification   | controlled category and type values                                                                                                            |
 | SSH context      | source address, SSH connection or session ID, certificate serial, fingerprint and principal                                                    |
 | Request          | canonical command, sanitized arguments, target namespace or resource and optional change-ticket ID                                             |
@@ -632,6 +638,26 @@ The /var/log/custom-shell directory shall be owned by root or the dedicated audi
 | Harvest evidence | job ID, sources, time range, file count, byte count, manifest hash and bundle hash                                                             |
 
 *Table 8 Extended audit record fields*
+
+### 8.2 Credential attribution and feasibility
+
+The `credential_id` is a namespaced, non-secret identifier for the credential accepted by SSHD on the plane where the customized shell starts. It identifies a credential instance, not merely a human account, local account, role, principal or authentication event.
+
+For certificate-authenticated sessions, the protected session initializer shall use an issuer-provided credential identifier when one is cryptographically bound to the accepted certificate. Otherwise, it shall derive a stable identifier from a canonical tuple containing the authentication scheme, trusted CA fingerprint, certificate serial and certified public-key fingerprint, for example `sshcert:sha256:<digest>`. The digest input and encoding are fixed by the audit schema. Certificate renewal creates a new credential ID. The audit record may retain certificate serial, fingerprint and principal as separate SSH-context fields.
+
+On the Host plane, `source.credential_id` identifies the Host-plane certificate accepted by Host SSHD. The earlier DMZNS LDAP password or DMZNS certificate belongs to the upstream authentication chain and, when available, may be recorded separately as `source.upstream_credential_id`; it shall not replace the credential ID that authorized the Host-plane session. A password, password hash, bearer token, private key, raw public key or user-supplied label shall never be logged or used as the credential ID.
+
+Before starting a role shell, a trusted authentication/session component shall create an integrity-protected context binding:
+
+- credential_id and credential type;
+- SSH connection or session ID;
+- local_account and numeric UID;
+- verified human account, role and plane;
+- authentication path and context creation time.
+
+The customized shell may carry an opaque session-context handle, but it cannot set or alter the bound values. The helper, broker and audit pipeline independently resolve the handle and verify that the context matches the invocation UID, role, plane and live session before recording or executing an action. Every record in one session uses the bound `credential_id` and `local_account`.
+
+This is feasible without changing SSHD configuration only if the approved current authentication/session path already makes the accepted certificate identity available to the protected session initializer. CP0 shall verify that capability with a real login. If the trusted credential identity is absent, ambiguous or cannot be bound to the live session, the role shell shall not enable privileged commands. The implementation shall not fall back to a user-controlled environment value, infer the credential from the local account or scrape an ambiguous log record. Any SSHD change needed to expose trusted credential metadata requires the separate review defined in Appendix A.
 
 
 ## 9 Policy Configuration
@@ -747,9 +773,10 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 | TIME-01 | Clock and synchronization status are visible; all time and timezone changes are denied. | Pass |
 | CERT-01 | Host certificate renewal uses the fixed identity and TPM-backed key and installs only a fully validated certificate. | Pass |
 | CERT-02 | Certificate revoke, delete, arbitrary identity, user-certificate issue, CA modification and private-key export are denied. | Pass |
-| AUD-01 | Every accepted, denied, malformed and failed command writes a completion record to /var/log/custom-shell/${role}-${uid}.log with timestamp, source, category, type, event ID and event result. | Pass |
+| AUD-01 | Every accepted, denied, malformed and failed command writes a completion record to /var/log/custom-shell/${role}-${uid}.log with timestamp, source.credential_id, source.local_account, source.uid, category, type, event ID and event result. | Pass |
 | AUD-02 | A failed command records event_result=fail and a non-secret failed_reason; a successful command records event_result=success and no failure reason. | Pass |
 | AUD-03 | host-admin cannot modify, delete, rename, truncate, chmod or redirect output into its audit file; rotation preserves ownership, mode and continuity. | Pass |
+| AUD-04 | A real certificate login produces the expected credential_id and local_account on every shell, denial, authorization, change and completion record; renewal changes credential_id, and missing or mismatched trusted credential context fails closed. | Pass |
 | DOS-01 | Restart, packet capture, edit, export and harvesting limits prevent unbounded concurrent or repeated work. | Pass |
 
 *Table 10 Acceptance test baseline*
@@ -767,7 +794,7 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 | Policy | Both | Root-owned host-admin policy containing execution phase, resource allowlists, limits, protected invariants and policy version. |
 | SSHD | Both | Retain the approved current Host SSHD configuration without modification in this design revision; perform compatibility verification only. |
 | MAC | Both | SELinux policy for shell, helper/broker, handlers, log spool and protected audit flow, including host_admin_editor_t write access only to the assigned candidate. |
-| Audit | Both | Stable event schema, protected local buffer, executor/phase field, remote forwarding integration and retention behavior. |
+| Audit | Both | Stable event schema with mandatory credential_id and local_account attribution, protected session-context binding, protected local buffer, executor/phase field, remote forwarding integration and retention behavior. |
 | Tests | Both | Parser, policy and validator unit tests plus integration, editor-escape, negative, privilege-escalation, isolation, rollback and resource-exhaustion tests. |
 | Migration | Phase 2 | Compatibility test, broker activation, removal of active helper delegation, rollback plan and evidence that permissions did not expand. |
 | Operations | Both | Allowlist inventory, edit recovery, rollback procedures, monitoring metrics and incident-response guidance. |
@@ -786,6 +813,8 @@ The following values are deployment policy, not architecture changes. They must 
 - Role-to-shell mapping for all six roles, role-specific grammar manifests, shared-core versioning, helper/broker role-mismatch behavior and plane-local execution endpoints.
 
 - Prompt local-account/UID source, separate audit-only human identity mapping, fixed character set, YYYY-MM-DDTHH:MMZ rendering, login/Enter/completion refresh behavior and clock-failure behavior.
+
+- Credential-ID namespace and derivation format, trusted certificate-metadata source, session-context lifetime and binding, renewal behavior, upstream credential linkage and fail-closed behavior when attribution is unavailable.
 
 - Restricted Vim package availability, root-owned profile, disabled features and staging transaction lifetime.
 
@@ -815,14 +844,14 @@ Configuration editing is the first complete Phase 1 feature slice. The initial h
 
 | **Work package** | **Scope** | **Checkpoint and required evidence** |
 |------------------|-----------|--------------------------------------|
-| P1.0 Contract freeze | Freeze config action schema, prompt behavior, identity context, audit schema, policy format and the real host.network.hosts config ID. | CP0: reviewed schemas, /etc/hosts policy, validator, health check, rollback and test matrix; no SSHD change. |
+| P1.0 Contract freeze | Freeze config action schema, prompt behavior, credential/local-account session context, audit schema, policy format and the real host.network.hosts config ID. | CP0: reviewed schemas, verified trusted credential metadata from a real login, /etc/hosts policy, validator, health check, rollback and test matrix; no SSHD change. |
 | P1.1 Minimal shell | Implement /usr/libexec/custom-shell/host-admin-shell with prompt, host-admin config grammar, help, time status and exit only; reject shell syntax, role switching and arbitrary paths. | CP1: parser, role-mismatch, prompt and rejection-audit tests pass. |
 | P1.2 Single helper skeleton | Install one root-owned helper with config-only dispatch, protected identity lookup and policy validation. | CP2: direct invocation cannot exceed policy; arbitrary commands/actions are rejected and audited. |
 | P1.3 Config catalog/read | Implement config.list/show and map host.network.hosts to the real Host-plane /etc/hosts target. | CP3: canonical mapping, raw-path denial, protected-entry enforcement, secret-target denial and namespace-write denial pass. |
 | P1.4 Stage and edit | Create protected transaction metadata and a mode-0600 user-owned candidate; run restricted Vim as the user under host_admin_editor_t. | CP4: Vim is never root, writes only the candidate, cannot escape its SELinux boundary and editor exit does not apply. |
 | P1.5 Validate and diff | Apply config-specific validation, protected-directive checks, candidate/original hashes and redacted bounded diff. | CP5: invalid, stale, mutated and concurrent candidates are rejected without target change. |
 | P1.6 Atomic apply/rollback | Reauthorize apply, create backup, replace atomically, restore metadata/label, health-check and roll back on failure. | CP6: success, replay denial, failure injection and rollback evidence pass. |
-| P1.7 Audit and recovery | Cover malformed, denied, successful, failed, discarded and rolled-back events; enforce limits and fail-closed behavior. | CP7: JSONL coverage, tamper resistance, quotas and recovery tests pass. |
+| P1.7 Audit and recovery | Cover malformed, denied, successful, failed, discarded and rolled-back events with credential_id and local_account on every record; enforce limits and fail-closed behavior. | CP7: JSONL attribution coverage, session-context mismatch tests, tamper resistance, quotas and recovery tests pass. |
 | P1.CFG | End-to-end Configuration Edit Gate | Go/no-go review with CP0–CP7 evidence, policy/catalog versions, hashes, representative audit chain and signed decision. |
 
 ### 14.2 Configuration Edit Gate command scope
@@ -967,6 +996,7 @@ This revision shall not add, remove or modify any SSHD directive. The deployed S
 {
   "timestamp": "2026-09-14T07:42:18.314Z",
   "source": {
+    "credential_id": "sshcert:sha256:<credential-digest>",
     "human_account": "hostadmin01",
     "local_account": "hostadmin",
     "uid": 10000
