@@ -4,7 +4,7 @@ _IT OT Separation SSHD RBAC_
 
 | **Document status** | Design baseline   |
 |---------------------|-------------------|
-| **Version**         | 1.7               |
+| **Version**         | 1.8               |
 | **Date**            | 15 September 2026 |
 | **Role**            | host-admin        |
 | **Target plane**    | DUT Host plane    |
@@ -62,7 +62,7 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 | D4 | Host-plane write boundary | host-admin can change approved Host resources and host-side inter-zone enforcement, but cannot change configuration inside ITns, OTns or DMZns. |
 | D5 | Cross-namespace read gateway | host-admin may harvest approved logs and inspect approved redacted configuration from all namespaces through a dedicated read-only gateway. |
 | D6 | No raw high-risk tools | Write-capable nft, tc, ebtables, systemctl, dmcli and account-management operations are exposed only as validated actions. |
-| D7 | Controlled Host configuration editing | Configuration is selected by a hierarchical <plane>.<domain>.<resource> logical config ID, edited only as a user-owned staging copy, independently validated and atomically installed by the privileged execution backend. Each ID maps to exactly one protected target profile. |
+| D7 | Controlled Host configuration resources | Configuration is selected by a hierarchical <plane>.<domain>.<resource> logical config ID. Each ID maps to exactly one protected resource profile and fixed backend adapter. File, structured, field, transaction and read-only modes share authorization, validation, audit and rollback contracts; Vim is used only where the profile permits staging-document editing. |
 | D8 | Restricted Vim is transitional | Phase 1 may use restricted Vim for the staging copy only. Vim never runs as root and is not the authorization or installation boundary. |
 | D9 | Protected evidence | Logs and time are readable but immutable to host-admin. Malformed, denied, successful and failed requests are audited. |
 | D10 | Constrained certificate renewal | host-admin may renew the fixed Host-plane device certificate, but cannot choose identity, CA role, principal, TTL or key export behavior. |
@@ -228,7 +228,9 @@ hostctl firewall apply <validated-change-id>
 hostctl firewall rollback <change-id>
 hostctl config list
 hostctl config show <approved-host-config-id>
+hostctl config get <approved-host-config-id> [<approved-field>]
 hostctl config edit <approved-host-config-id>
+hostctl config set <approved-host-config-id> <approved-field> <validated-value>
 hostctl config validate <edit-request-id>
 hostctl config diff <edit-request-id>
 hostctl config apply <edit-request-id>
@@ -253,7 +255,7 @@ hostctl exit
 |--------------------|---------------------|--------------|-----------------|
 | network | net-handler | Host interfaces and routes | Read and constrained write |
 | firewall | firewall-handler | Host and boundary policy | Validated transaction only |
-| config | config-handler | Approved Host configuration IDs | Staged edit, validate, diff and atomic apply |
+| config | config-handler | Approved Host configuration resource profiles | Profile-controlled show/get/edit/set, validate, diff, apply and rollback |
 | diagnose | diagnostic-handler | Network and system observations | Bounded execution and output |
 | account | account-handler | Approved Host-local identities | Lifecycle operation only |
 | service | service-handler | Allowlisted Host units | Status, reload or restart |
@@ -282,11 +284,12 @@ Network changes are policy transactions rather than direct execution of networki
 - ebtables compatibility is read-only; new bridging policy should be implemented with nftables where supported.
 
 
-### 6.2 Approved Host configuration changes
 
-Approved Host configuration is addressed only by logical configuration ID. Raw destination paths are never accepted from the user. The policy maps each config ID to one canonical target, validator, protected directives, ownership, mode, SELinux label, health check and rollback rule. ITns, OTns and DMZns configuration IDs remain read-only under Section 6.6.
+### 6.2 Approved Host configuration resources
 
-The general config-ID grammar is:
+A config ID identifies a logical configuration resource, not a filesystem object. The protected policy resolves the ID to one resource profile containing a backend adapter, backend-owned locator, supported operations, edit mode, schema, validator, concurrency control, persistence behavior, health check, audit rules and rollback strategy. The user cannot provide or override a file path, CCSP parameter root, D-Bus destination/object/method, database query, executable, netlink operation or other backend locator.
+
+The general config-ID grammar remains:
 
 ~~~text
 <plane>.<domain>.<resource>
@@ -294,70 +297,132 @@ The general config-ID grammar is:
 
 - plane identifies the security plane. A host-admin write action accepts only host.
 
-- domain is a stable functional category such as network, system, access or identity.
+- domain is a stable functional category such as network, system, access, identity, rdkb or service.
 
-- resource is a stable logical resource name such as hosts, hostname, sshd or sssd.
+- resource is a stable logical resource name such as hosts, dns, hostname, sshd, sssd or lan.
 
-Each segment shall use a restricted lowercase identifier grammar and shall not contain slash, backslash, whitespace, control characters, empty segments or traversal notation. A complete config ID is a protected catalog key and maps to exactly one target transaction profile. The user cannot provide a second target/path parameter.
+Each segment shall use a restricted lowercase identifier grammar and shall not contain slash, backslash, whitespace, control characters, empty segments or traversal notation. A broad ID such as host.config is prohibited because it would require a second user-selected target.
 
-Examples:
+#### 6.2.1 Configuration resource profile
 
-| **Config ID** | **Logical purpose** | **Gate status** |
-|---------------|---------------------|-----------------|
-| host.network.hosts | Host static name mappings in /etc/hosts | Enabled for first Configuration Edit Gate |
-| host.system.hostname | Host system hostname configuration | Future, disabled |
-| host.access.sshd | Approved Host SSHD configuration | Future, disabled |
-| host.identity.sssd | Approved Host SSSD configuration | Future, disabled |
+Every complete config ID maps to exactly one root-owned resource profile:
 
-A broad ID such as host.config is not sufficient because it would require another user-selected target. That would weaken the one-ID-to-one-target allowlist and is therefore prohibited.
+~~~yaml
+config_id: <plane>.<domain>.<resource>
+backend:
+  type: <file|ccsp|dbus|key-value|netlink|internal-api>
+  locator: <protected-backend-specific-value>
+edit_mode: <document|structured|field|transaction|read-only>
+operations: <protected-allowlist>
+schema: <validator-schema>
+snapshot: <snapshot-adapter>
+concurrency: <hash|revision|etag|generation>
+apply: <apply-adapter>
+health_check: <health-check-adapter>
+rollback: <native-transaction|restore-snapshot|compensating-actions|none>
+persistence: <runtime|persistent|both>
+audit_redaction: <protected-rules>
+~~~
 
-#### 6.2.1 Edit transaction
+The locator and adapter configuration are server-owned and never included as user-controlled request fields.
 
-1. The administrator runs hostctl config edit <approved-host-config-id>.
+| **Config ID** | **Backend** | **Edit mode** | **Status** |
+|---------------|-------------|---------------|------------|
+| host.network.hosts | File: /etc/hosts | document | Enabled for first Configuration Edit Gate |
+| host.network.dns | CCSP or approved network service | structured or field | Future, disabled |
+| host.system.hostname | Approved system API | field | Future, disabled |
+| host.rdkb.lan | CCSP message bus | field or structured | Future, disabled |
+| host.access.sshd | Approved Host SSHD configuration | document | Future, disabled |
+| host.identity.sssd | Approved Host SSSD configuration | document or structured | Future, disabled |
 
-2. The privileged execution backend authorizes the config ID, captures the original file identity and SHA-256 hash and creates an opaque edit-request ID.
+A resource profile can cover a cohesive set of fields, such as an approved DNS server list, but it cannot become a generic gateway to arbitrary parameters in the backend.
 
-3. It creates a transaction directory under /run/custom-shell/edit/<uid>/<edit-request-id> with mode 0700 and a candidate regular file with mode 0600 owned by the authenticated user. Root-owned transaction metadata is stored separately and is not writable by that user.
+#### 6.2.2 Edit modes
 
-4. The customized shell launches restricted Vim only for that exact candidate. Vim runs permanently as the authenticated UID, with no capabilities or privileged supplementary groups. It never opens the protected destination directly.
+| **Edit mode** | **User interaction** | **Required behavior** |
+|---------------|----------------------|-----------------------|
+| document | config edit on an approved text representation | Create a user-owned staging candidate; restricted Vim may be used. |
+| structured | config edit on canonical YAML/JSON generated by the adapter | Expose only approved non-secret fields; parse back into typed values. Restricted Vim may be used on the staging representation. |
+| field | config get/set with an approved field and typed value | No general editor; validate field allowlist, type, range and dependency rules. |
+| transaction | Domain-specific stage/validate/apply/rollback actions | No general editor unless the profile defines a safe declarative representation. |
+| read-only | config show/get only | No candidate, set or apply operation. |
 
-5. When Vim exits, no installation occurs automatically. The administrator may run config validate and config diff, then explicitly run config apply or config discard.
+The profile controls which verbs are legal. A request for config edit against a field or read-only profile, or config set against a document profile, is rejected unless that operation is explicitly defined.
 
-#### 6.2.2 Restricted Vim profile
+#### 6.2.3 Common transaction lifecycle
 
-The approved Phase 1 invocation is equivalent to:
+1. Resolve the config ID to its protected resource profile and authorize the requested operation.
+
+2. Use the fixed backend adapter to obtain a canonical snapshot, backend revision and canonical state hash. Secret values are omitted or represented only by protected placeholders and hashes.
+
+3. For document or structured mode, create an opaque edit request and candidate representation. For field mode, construct a typed candidate change. For transaction mode, load the referenced protected change object.
+
+4. Validate request ownership, schema, types, ranges, cross-field dependencies, protected invariants and secret-handling rules.
+
+5. Produce a bounded, redacted semantic diff between the canonical current state and candidate state.
+
+6. Bind the validated change ID to actor, role, config ID, policy version, current revision/hash and candidate hash.
+
+7. Before apply, reauthorize the actor and use hash, revision, ETag or generation comparison to reject concurrent changes and replay.
+
+8. Apply through the fixed adapter, run the configured health check and record the resulting revision/state hash.
+
+9. On failure, use a native backend transaction, restore the snapshot or run fixed compensating actions. A resource with no safe rollback may not expose general edit/apply unless explicitly risk-approved.
+
+10. Emit one correlated audit chain covering request, decision, snapshot, validation, diff, apply, health check and rollback.
+
+#### 6.2.4 Staging and restricted Vim
+
+For document and approved structured modes, the privileged backend creates /run/custom-shell/edit/<uid>/<edit-request-id> with mode 0700 and a mode-0600 candidate owned by the authenticated user. Protected transaction metadata remains outside that user's write control.
+
+The approved Phase 1 Vim invocation is equivalent to:
 
 ~~~text
 /usr/bin/vim -Z -n -X -u /etc/custom-shell/vimrc -U NONE --noplugin -i NONE -- <candidate>
 ~~~
 
-The root-owned profile shall disable modelines, user plugins, user startup files, shell and filter escapes, external commands, swap files and user-controlled editor environment. The candidate path is supplied by the staging manager, not by the user. Because restricted Vim alone is not a complete filesystem sandbox, a dedicated SELinux editor domain shall permit writing only the assigned candidate and deny other configuration, audit, policy, key and executable paths.
+Vim runs permanently as the authenticated UID with no capabilities or privileged supplementary groups. The root-owned profile disables modelines, user plugins, user startup files, shell/filter escapes, external commands, swap files and user-controlled editor environment. The dedicated host_admin_editor_t SELinux domain permits writing only the assigned candidate and denies protected configuration, audit, policy, key and executable paths.
 
-Restricted Vim is a transitional usability control, not the privilege boundary. If an editor escape or alternate-file command is attempted, the process remains confined to the unprivileged hostadmin UID and the dedicated editor domain. The helper still reauthorizes every action and cannot execute an arbitrary command. Phase 2 may retain the same staging editor or replace it with a smaller built-in editor without changing config action semantics.
+Restricted Vim is a transitional usability control, not the authorization or apply boundary. Editor exit never changes the live resource. The user must explicitly validate, review the diff and apply or discard.
 
-#### 6.2.3 Validation and installation
+Full-document or structured staging is allowed only when the representation does not disclose protected credentials or private material. Mixed secret resources expose only approved non-secret fields and preserve secrets inside the adapter, or remain field-only/read-only.
 
-Before apply, the helper or broker shall:
+#### 6.2.5 File backend
 
-- Revalidate caller UID, role, config ID, request ownership and transaction lifetime.
+A file adapter additionally shall:
 
-- Open the transaction through fixed directory file descriptors, reject symlinks, require a regular file with the expected UID and mode and prevent path traversal or replacement.
+- Resolve a fixed canonical destination through protected directory file descriptors.
 
-- Confirm that the protected target still matches the original identity and hash, or reject the request as a concurrent modification.
+- Reject symlink, hard-link, ownership, mode and file-type substitution.
 
-- Enforce file-size, encoding, schema, secret-handling and protected-directive rules.
+- Bind validation to the original file identity/hash and candidate hash.
 
-- Run the native validator where applicable, such as SSHD, SSSD, nftables or systemd validation.
+- Run format and service-specific validators.
 
-- Record a redacted diff and old/new hashes, create a protected versioned backup and install through an atomic same-filesystem replacement.
+- Create a protected versioned backup and use atomic same-filesystem replacement.
 
-- Restore the required owner, group, mode and SELinux label.
+- Restore required owner, group, mode and SELinux label.
 
-- Run the configured health check and automatically restore the prior version if validation, activation or health checking fails.
+- Run activation and health checks and restore the prior version on failure.
 
-Full-file Vim editing is allowed only when the candidate does not disclose protected credentials or private material. For a mixed configuration that contains protected secrets, the config ID shall expose only structured non-secret fields and preserve secret fields inside the privileged backend, or the config ID shall remain read-only.
+The current deployed SSHD configuration is not changed by adopting this design. A future approved SSHD resource profile requires separate authorization and native validation.
 
-Configuration apply and service reload or restart are separate authorized actions unless the protected policy explicitly defines one atomic transaction. The current deployed SSHD configuration is not changed by adopting this design; only a future host-admin action against an approved SSHD config ID may change it after implementation and separate authorization.
+#### 6.2.6 Non-file backend
+
+A non-file adapter shall never pass user data directly to dmcli, a D-Bus method selector, SQL interpreter, shell, network utility or equivalent generic interface. It maps approved fields and typed values to fixed backend operations.
+
+For structured mode, the adapter serializes an approved canonical representation to staging and parses it back into typed values. For field mode, config get/set operates only on profile-listed field names. For transaction mode, the backend consumes a protected declarative change object rather than a user command string.
+
+Apply and rollback follow backend capability:
+
+| **Backend capability** | **Required strategy** |
+|------------------------|-----------------------|
+| Native transaction | Begin, apply, validate, then commit or abort. |
+| Revision/ETag/generation | Compare-and-set against the validated revision. |
+| No native transaction but reversible | Snapshot, ordered apply, health check and reverse-order compensating rollback. |
+| Irreversible or unsafe rollback | Do not expose general edit/apply; use a separately reviewed purpose-built action. |
+
+Audit records use canonical state hashes and redacted field-level changes instead of file hashes where applicable. They also include backend type, old/new revision, persistence scope, health-check result and rollback/compensation result.
 
 ### 6.3 Service restart
 
@@ -411,8 +476,9 @@ Certificate renewal is limited to the DUT Host-plane certificate. The handler de
 | Privileged editor | Vim or another general editor executes with elevated privilege. | Explicitly prohibited; the privileged backend prepares and applies, while the editor runs only as the authenticated user. |
 | Helper abuse | A user invokes the Phase 1 helper outside the intended UI or supplies a hidden command. | One fixed helper, no exec/run-shell action, server-owned action table, independent role and parameter validation and protected audit. |
 | Argument injection | A valid action is extended with a dangerous option or secondary command. | Typed grammar, option allowlist, no duplicate options and direct execve-style handler invocation with fixed executable paths. |
-| Path traversal | A log or configuration request reaches an arbitrary file or secret. | Logical IDs, fixed directory descriptors, openat2-style resolution, no symlink following and no user-selected destination. |
-| Staging tampering | A candidate or transaction is replaced between validation and installation. | Opaque request ID, protected metadata, ownership/mode checks, file-descriptor validation, hashes, transaction lock and atomic rename. |
+| Target/locator injection | A request reaches an arbitrary file, CCSP parameter, D-Bus object/method, database query or backend operation. | Logical IDs, one protected resource profile per ID, fixed backend adapters/locators, file descriptor controls for files and no user-selected destination. |
+| Staging or state tampering | A candidate, resource revision or transaction is changed between validation and apply. | Opaque request ID, protected metadata, ownership/mode checks, candidate/state hashes, revision or ETag checks, transaction lock and replay denial. |
+| Non-atomic backend | A multi-field non-file update partially applies and leaves unsafe state. | Native transaction where available; otherwise protected snapshot, ordered operations, health check, fixed compensating rollback and fail-closed handling. |
 | Cross-plane bypass | Host privilege modifies IT, OT or DMZ configuration. | Namespace read gateway, no namespace write action, no exposed setns/LXC command and SELinux confinement. |
 | Audit tampering | Administrator changes time, logs or collection manifests. | No write capability to audit paths or time services; trusted logging path and remote forwarding where available. |
 | Operational denial | Repeated restart, capture, edit or harvest actions exhaust resources. | Rate, concurrency, transaction, quota, timeout and bounded-output limits. |
@@ -522,9 +588,11 @@ permissions:
   host_network: constrained-write
   host_firewall: validated-transaction
   host_configuration:
-    mode: staged-edit
-    editor: restricted-vim
+    mode: resource-profile
     config_ids: <protected-allowlist>
+    backend_types: <protected-allowlist>
+    edit_modes: [document, structured, field, transaction, read-only]
+    editor: restricted-vim-for-document-and-approved-structured-only
   host_accounts: lifecycle-only
   host_services: [status, reload, restart]
   namespace_logs: [host, itns, otns, dmzns]
@@ -587,6 +655,9 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 | CFG-04 | Apply rejects symlinks, path replacement, wrong owner/mode, expired transaction, concurrent target change and invalid syntax. | Pass |
 | CFG-05 | A valid candidate is backed up, installed atomically with correct ownership/mode/SELinux label and rolled back on failed activation or health check. | Pass |
 | CFG-06 | A secret-bearing configuration cannot be exposed through full-file staging; only approved non-secret fields are editable or the config remains read-only. | Pass |
+| CFG-07 | A non-file config ID resolves to one fixed backend adapter and protected locator; user-supplied backend targets, methods, parameters outside the profile or interpreter input are rejected. | Pass |
+| CFG-08 | Structured and field profiles produce typed validated changes, enforce revision/concurrency checks and record canonical state hashes and redacted semantic diffs. | Pass |
+| CFG-09 | A non-file multi-field failure uses native abort, snapshot restoration or fixed compensating rollback; unsafe irreversible resources do not expose general edit/apply. | Pass |
 | NET-01 | Approved network and firewall changes validate, apply, health-check and support rollback. | Pass |
 | NET-02 | Attempts to remove protected default-drop, WAN SSH denial or zone-isolation rules are rejected. | Pass |
 | SVC-01 | Allowlisted services can be restarted and return to active state; stop, disable and mask are denied. | Pass |
@@ -613,7 +684,7 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 | Shell | Both | /usr/libexec/sshd-rbac-shell with trusted local-account/UID/current-time prompt, host-admin grammar, canonical action construction, help, edit orchestration and bounded output. |
 | Privileged helper | Phase 1 | /usr/libexec/host-admin-helper as one root-owned executable with server-side policy, independent validation, internal handler dispatch and protected audit. |
 | Broker | Phase 2 | host-admin-brokerd UNIX-socket service with peer-credential validation, the same canonical action schema and handler dispatch. |
-| Configuration workflow | Both | Config-ID catalog, protected transaction metadata, user-owned staging copy, restricted Vim profile, validators, backup, atomic apply, health check and rollback. |
+| Configuration workflow | Both | Config-ID resource-profile catalog, fixed backend adapters, profile-specific edit modes, protected transaction metadata, optional user-owned staging, typed validators, canonical state/revision tracking, apply, health check and rollback/compensation. |
 | Handlers | Both | Network, firewall, configuration, diagnostics, account, service, RDK-B, namespace read, log harvest, time status and certificate renewal handlers. |
 | Policy | Both | Root-owned host-admin policy containing execution phase, resource allowlists, limits, protected invariants and policy version. |
 | SSHD | Both | Retain the approved current Host SSHD configuration without modification in this design revision; perform compatibility verification only. |
@@ -632,7 +703,7 @@ The following values are deployment policy, not architecture changes. They must 
 
 - Allowlisted Host services and the health check for each service.
 
-- Permitted Host configuration IDs, destination mappings, protected directives and validators, including SSHD and SSSD activation and rollback rules.
+- Permitted Host configuration IDs and resource profiles, backend types and protected locators, supported operations/edit modes, schemas, concurrency tokens, persistence scope, health checks, audit redaction and rollback/compensation rules, including SSHD and SSSD activation and rollback rules.
 
 - Prompt local-account/UID source, separate audit-only human identity mapping, fixed character set, YYYY-MM-DDTHH:MMZ rendering, login/Enter/completion refresh behavior and clock-failure behavior.
 
@@ -660,7 +731,7 @@ The following values are deployment policy, not architecture changes. They must 
 
 ### 14.1 Delivery rule
 
-Configuration editing is the first complete Phase 1 feature slice. Until the Configuration Edit Gate is accepted, no service restart, network/firewall write, account lifecycle, RDK-B set, certificate renewal or namespace state-changing action may be enabled. The current SSHD configuration remains unchanged, and SSHD/SSSD config IDs remain disabled during this first gate.
+Configuration editing is the first complete Phase 1 feature slice. The initial host.network.hosts gate validates the common resource-profile contract and file adapter; later non-file adapters must pass CFG-07 through CFG-09 before enablement. Until the Configuration Edit Gate is accepted, no service restart, network/firewall write, account lifecycle, RDK-B set, certificate renewal or namespace state-changing action may be enabled. The current SSHD configuration remains unchanged, and SSHD/SSSD config IDs remain disabled during this first gate.
 
 | **Work package** | **Scope** | **Checkpoint and required evidence** |
 |------------------|-----------|--------------------------------------|
