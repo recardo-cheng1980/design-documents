@@ -4,14 +4,14 @@ _IT OT Separation SSHD RBAC_
 
 | **Document status** | Design baseline   |
 |---------------------|-------------------|
-| **Version**         | 1.3               |
+| **Version**         | 1.4               |
 | **Date**            | 15 September 2026 |
 | **Role**            | host-admin        |
 | **Target plane**    | DUT Host plane    |
 
 **Decision summary.** The host-admin receives a forced, allowlist-based administration shell on the Host plane. The role can manage approved Host networking, accounts, services, RDK-B parameters, approved Host configuration and Host certificates. It can harvest logs and inspect redacted configuration from ITns, OTns and DMZns, but cannot modify those namespaces.
 
-Delivery uses two phases while preserving one command grammar, one policy model and one audit schema. Phase 1 uses the unprivileged customized shell with one root-owned privileged helper. Phase 2 replaces that execution path with one confined UNIX-socket broker. Approved Host configuration may be edited with restricted Vim only on a user-owned staging copy; the helper or broker independently validates and atomically installs it. Neither phase provides an unrestricted root shell. Before every command, the shell prompt displays the verified human username, mapped local account and current system time in UTC.
+Delivery uses two phases while preserving one command grammar, one policy model and one audit schema. Phase 1 uses the unprivileged customized shell with one root-owned privileged helper. Phase 2 replaces that execution path with one confined UNIX-socket broker. Approved Host configuration may be edited with restricted Vim only on a user-owned staging copy; the helper or broker independently validates and atomically installs it. Neither phase provides an unrestricted root shell. At login and whenever the prompt is redisplayed, the shell shows the verified human username, mapped local account and current system time in UTC with minute precision. The time does not tick while the shell waits for input.
 
 ## 1 Purpose and Scope
 
@@ -67,7 +67,7 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 | D9 | Protected evidence | Logs and time are readable but immutable to host-admin. Malformed, denied, successful and failed requests are audited. |
 | D10 | Constrained certificate renewal | host-admin may renew the fixed Host-plane device certificate, but cannot choose identity, CA role, principal, TTL or key export behavior. |
 | D11 | Stable migration contract | Command syntax, action IDs, validators, role policy, event IDs and audit fields remain compatible across both phases. |
-| D12 | Trusted prompt identity and time | Every prompt displays the verified human username, mapped local account and current UTC system time. Values come from trusted session and system sources and cannot be supplied by the user. |
+| D12 | Trusted prompt identity and time | The prompt displays the verified human username, mapped local account and current UTC system time with minute precision. It refreshes at login, after Enter is submitted and after command completion; it does not tick while input is active. Values come from trusted sources and cannot be supplied by the user. |
 
 *Table 1 Core design decisions*
 
@@ -135,7 +135,7 @@ flowchart TD
 
 3. The shell obtains the verified human account from authenticated session context and the mapped local account and numeric UID from protected identity mapping. These values are not read from user command input or user-controlled environment variables.
 
-4. Before accepting each command, the shell freshly reads the system clock, converts it to UTC and renders the fixed prompt format defined in Section 5.1.
+4. At initial login, the shell reads the system clock, converts it to UTC minute precision and renders the fixed prompt format defined in Section 5.1.
 
 5. The shell records SSH context and parses one permitted command without invoking /bin/sh.
 
@@ -147,7 +147,7 @@ flowchart TD
 
 9. The trusted audit path independently generates its own event timestamp and records the authorization decision, operation result and applicable before/after state, hashes and rollback status.
 
-10. After the result is returned, the shell reads the clock again and displays a new prompt with the same verified identity and updated UTC time.
+10. When Enter is submitted, the shell processes the entered command. An empty command immediately causes a refreshed prompt. After a non-empty command succeeds, fails or is denied, the shell reads the clock again and displays a new prompt with the same verified identity and updated UTC minute.
 
 ## 4 Host Admin Permission Model
 
@@ -194,19 +194,21 @@ The shell exposes a namespaced command grammar. The parser accepts only document
 
 ### 5.1 Shell prompt
 
-The prompt shall display both the verified human account and mapped local account because multiple human administrators may terminate as the same local hostadmin identity. It shall also display the current system time in UTC. The fixed format is:
+The prompt shall display both the verified human account and mapped local account because multiple human administrators may terminate as the same local hostadmin identity. It shall also display the current system time in UTC with minute precision. The fixed format is:
 
 ~~~text
-<human-account>(<local-account>:<uid>) [<UTC-RFC3339-time>] hostctl>
+<human-account>(<local-account>:<uid>) [<YYYY-MM-DDTHH:MMZ>] hostctl>
 ~~~
 
 Example:
 
 ~~~text
-hostadmin01(hostadmin:10000) [2026-09-15T08:42:17Z] hostctl>
+hostadmin01(hostadmin:10000) [2026-09-15T09:42Z] hostctl>
 ~~~
 
-The timestamp is a prompt-time snapshot. It is refreshed immediately before every prompt, including after a command completes, fails or is denied, but it does not tick or redraw while the administrator is typing. Seconds are required; sub-second precision is optional for the interactive prompt but remains required for audit records. The literal Z timezone marker is required so the displayed time cannot be confused with local time.
+The displayed time is a prompt snapshot, not a live clock. It is generated at initial login and refreshed when Enter is submitted: an empty command redraws it immediately, while a non-empty command redraws it after the command completes, fails or is denied. It does not tick or redraw while the administrator is typing or while a command is running. Minute precision is required for the prompt; audit records independently retain UTC RFC 3339 timestamps with sub-second precision. The literal Z timezone marker is required so the displayed time cannot be confused with local time.
+
+No background ticker, timerfd, periodic signal or asynchronous ANSI status-line redraw is required. A normal blocking input loop is sufficient.
 
 The human account, local account and UID shall be obtained from authenticated session context and protected identity mapping. User input, environment variables, terminal escape sequences and configuration-editor content cannot override them. Prompt fields shall use a restricted character set and fixed formatting so account data cannot inject terminal control characters.
 
@@ -487,8 +489,9 @@ execution:
 display:
   prompt_identity: human-and-local
   prompt_uid: true
-  prompt_time: utc-rfc3339-seconds
-  refresh: before-every-prompt
+  prompt_time: utc-iso8601-minute
+  refresh: login-enter-command-completion
+  ticking: false
 permissions:
   host_network: constrained-write
   host_firewall: validated-transaction
@@ -546,8 +549,8 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 | AUTH-02 | A DMZNS-only, wrong-plane, wrong-role, expired or wrong-device certificate is rejected by Host SSHD. | Pass |
 | SHELL-01 | bash, sh, user-facing sudo, su, pipes, redirection, command substitution and interpreter execution are rejected and audited. | Pass |
 | SHELL-02 | Unknown commands, options, duplicate options and overlong input are rejected before privileged execution. | Pass |
-| UI-01 | Every prompt displays the verified human account, mapped local account, numeric UID and UTC time using the fixed format. | Pass |
-| UI-02 | The displayed UTC time is refreshed before each prompt after successful, failed and denied commands, and remains a stable snapshot without redrawing active input. | Pass |
+| UI-01 | Every prompt displays the verified human account, mapped local account, numeric UID and UTC minute using the fixed YYYY-MM-DDTHH:MMZ format. | Pass |
+| UI-02 | The UTC minute is generated at login, refreshed immediately after an empty Enter, and refreshed after every successful, failed or denied command; it never ticks or redraws while input or command execution is active. | Pass |
 | UI-03 | User commands, environment variables, terminal control characters and staged configuration content cannot alter or spoof prompt identity or time. | Pass |
 | UI-04 | The prompt timestamp is not trusted as the audit timestamp; audit events independently obtain UTC RFC 3339 timestamps with sub-second precision. | Pass |
 | PHASE-01 | Phase 1 uses exactly one privileged helper; direct invocation cannot exceed the same host-admin action policy. | Pass |
@@ -605,7 +608,7 @@ The following values are deployment policy, not architecture changes. They must 
 
 - Permitted Host configuration IDs, destination mappings, protected directives and validators, including SSHD and SSSD activation and rollback rules.
 
-- Prompt identity source and authenticated human-to-local mapping, fixed character set, UTC rendering and clock-failure behavior.
+- Prompt identity source and authenticated human-to-local mapping, fixed character set, YYYY-MM-DDTHH:MMZ rendering, login/Enter/completion refresh behavior and clock-failure behavior.
 
 - Restricted Vim package availability, root-owned profile, disabled features and staging transaction lifetime.
 
