@@ -4,7 +4,7 @@ _IT OT Separation SSHD RBAC_
 
 | **Document status** | Design baseline   |
 |---------------------|-------------------|
-| **Version**         | 1.5               |
+| **Version**         | 1.6               |
 | **Date**            | 15 September 2026 |
 | **Role**            | host-admin        |
 | **Target plane**    | DUT Host plane    |
@@ -639,10 +639,10 @@ Configuration editing is the first complete Phase 1 feature slice. Until the Con
 
 | **Work package** | **Scope** | **Checkpoint and required evidence** |
 |------------------|-----------|--------------------------------------|
-| P1.0 Contract freeze | Freeze config action schema, prompt behavior, identity context, audit schema, policy format and pilot config ID. | CP0: reviewed schemas, pilot policy, validators and test matrix; no SSHD change. |
+| P1.0 Contract freeze | Freeze config action schema, prompt behavior, identity context, audit schema, policy format and the real host.hosts config ID. | CP0: reviewed schemas, /etc/hosts policy, validator, health check, rollback and test matrix; no SSHD change. |
 | P1.1 Minimal shell | Implement prompt, config grammar, help, time status and exit only; reject shell syntax and arbitrary paths. | CP1: parser tests, prompt transcript and rejection audit records pass. |
 | P1.2 Single helper skeleton | Install one root-owned helper with config-only dispatch, protected identity lookup and policy validation. | CP2: direct invocation cannot exceed policy; arbitrary commands/actions are rejected and audited. |
-| P1.3 Config catalog/read | Implement config.list/show and logical config-ID mapping using host.test-config first. | CP3: canonical mapping, raw-path denial, secret-target denial and namespace-write denial pass. |
+| P1.3 Config catalog/read | Implement config.list/show and map host.hosts to the real Host-plane /etc/hosts target. | CP3: canonical mapping, raw-path denial, protected-entry enforcement, secret-target denial and namespace-write denial pass. |
 | P1.4 Stage and edit | Create protected transaction metadata and a mode-0600 user-owned candidate; run restricted Vim as the user under host_admin_editor_t. | CP4: Vim is never root, writes only the candidate, cannot escape its SELinux boundary and editor exit does not apply. |
 | P1.5 Validate and diff | Apply config-specific validation, protected-directive checks, candidate/original hashes and redacted bounded diff. | CP5: invalid, stale, mutated and concurrent candidates are rejected without target change. |
 | P1.6 Atomic apply/rollback | Reauthorize apply, create backup, replace atomically, restore metadata/label, health-check and roll back on failure. | CP6: success, replay denial, failure injection and rollback evidence pass. |
@@ -680,15 +680,73 @@ hostadmin:10000 [2026-09-15T09:42Z] hostctl>
 
 The prompt is generated at login, refreshed after an empty Enter and refreshed after a submitted command completes, fails or is denied. It does not tick while the user types or while the command runs. The verified human account remains present in protected audit records but is not shown in the prompt.
 
-### 14.3 Pilot order
 
-1. Use host.test-config mapped to an isolated non-production target to prove the complete mechanism.
+### 14.3 Real use case: host.hosts
 
-2. After CP0–CP7 pass, enable one separately approved low-risk Host config ID with its own validator, backup, health check and rollback policy.
+The first Configuration Edit Gate shall use the real Host-plane /etc/hosts file. The use case is an authorized administrator adding or updating an approved static hostname mapping required by a Host-plane management service.
 
-3. Keep SSHD and SSSD editing disabled throughout the first gate. Their deployed hashes must remain unchanged.
+The user-facing resource is the logical ID host.hosts. The shell and helper shall not accept /etc/hosts or any other raw path as an argument.
 
-4. Reject all raw paths, ITns/OTns/DMZns write targets, secret-bearing full-file targets, audit paths, policy files, key material and executable paths.
+~~~yaml
+config_id: host.hosts
+target: /etc/hosts
+access: staged-edit
+expected_owner: root
+expected_group: root
+expected_mode: "0644"
+validator: hosts-file-validator
+activation: live-read
+health_check: hosts-resolution-check
+rollback: automatic
+~~~
+
+The exact SELinux type and size/line limits are deployment-policy values and shall be captured in the protected config catalog before CP0 approval.
+
+#### Required edit flow
+
+~~~text
+hostctl config show host.hosts
+hostctl config edit host.hosts
+hostctl config validate <edit-request-id>
+hostctl config diff <edit-request-id>
+hostctl config apply <edit-request-id>
+~~~
+
+The administrator edits only the user-owned staging candidate. A typical authorized change adds or updates a policy-approved mapping:
+
+~~~text
+<approved-ip-address> <approved-hostname> [<approved-alias> ...]
+~~~
+
+The validator shall:
+
+- Require a regular text file with no NUL bytes, terminal control characters or over-limit lines.
+
+- Parse each non-comment record as one valid IPv4 or IPv6 address followed by one or more syntactically valid hostnames or aliases.
+
+- Preserve policy-required loopback, localhost, DUT hostname and management entries.
+
+- Reject removal or conflicting redefinition of protected entries.
+
+- Reject unapproved addresses, names or aliases where the deployment policy defines an allowlist.
+
+- Recheck candidate ownership, mode, transaction binding and SHA-256 hash before apply.
+
+- Confirm the original /etc/hosts identity and hash have not changed since the transaction began.
+
+After atomic installation, the health check shall:
+
+- Confirm localhost and every policy-required local name still resolve to the expected address.
+
+- Confirm the newly approved hostname resolves to the requested approved address through the system resolver path.
+
+- Verify /etc/hosts ownership, mode and SELinux label.
+
+- Trigger automatic rollback when parsing, resolution or metadata validation fails.
+
+Because /etc/hosts is consumed through normal resolver calls, this use case does not require a service restart. The audit chain shall include config ID, actor, old/new hashes, redacted diff, validator result, backup ID, apply result, health-check result and rollback status.
+
+SSHD and SSSD config IDs remain disabled throughout this first gate. Their deployed configuration hashes must remain unchanged. After host.hosts passes the gate, each additional Host config ID requires its own target mapping, validator, protected invariants, health check, rollback rules and approval.
 
 ### 14.4 Gate decision
 
