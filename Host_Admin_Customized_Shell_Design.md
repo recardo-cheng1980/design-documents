@@ -4,7 +4,7 @@ _IT OT Separation SSHD RBAC_
 
 | **Document status** | Design baseline   |
 |---------------------|-------------------|
-| **Version**         | 1.8               |
+| **Version**         | 1.9               |
 | **Date**            | 15 September 2026 |
 | **Role**            | host-admin        |
 | **Target plane**    | DUT Host plane    |
@@ -56,7 +56,7 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 
 | **ID** | **Decision** | **Design rule** |
 |--------|--------------|-----------------|
-| D1 | Forced command shell | Host SSHD starts the customized shell for hostadmin. User-supplied commands are parsed by an exact grammar and are never passed to a POSIX shell. |
+| D1 | Role-specific forced shell | Host SSHD starts /usr/libexec/custom-shell/host-admin-shell for the host-admin role through the approved session mapping. User-supplied commands are parsed by its exact role grammar and are never passed to a POSIX shell. |
 | D2 | Two-phase privileged execution | Phase 1 uses one root-owned helper; Phase 2 uses one privileged UNIX-socket broker. Both consume the same canonical action schema and server-owned policy. |
 | D3 | Unprivileged interactive shell | The customized shell and configuration editor run as the authenticated hostadmin UID with no inherited capabilities or privileged groups. |
 | D4 | Host-plane write boundary | host-admin can change approved Host resources and host-side inter-zone enforcement, but cannot change configuration inside ITns, OTns or DMZns. |
@@ -69,6 +69,7 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 | D11 | Stable migration contract | Command syntax, action IDs, validators, role policy, event IDs and audit fields remain compatible across both phases. |
 | D12 | Trusted prompt identity and time | The prompt displays only the mapped local account, numeric UID and current UTC system time with minute precision. It refreshes at login, after Enter is submitted and after command completion; it does not tick while input is active. Values come from trusted sources and cannot be supplied by the user. The human account remains in protected audit data only. |
 | D13 | Configuration-edit-first gate | Phase 1 implements and accepts the complete Host configuration edit transaction before enabling other state-changing Phase 1 domains. |
+| D14 | One shell entry point per role | host-admin, it-admin, ot-admin, dmz-admin, auditor and ot-operator each receive a distinct customized-shell executable and grammar. Common implementation code may be shared, but role selection and authorization are never derived solely from an executable name or user input. |
 
 *Table 1 Core design decisions*
 
@@ -116,7 +117,7 @@ flowchart TD
 | **Component** | **Phase** | **Responsibility** |
 |---------------|-----------|--------------------|
 | Host SSHD | Both | Authenticates the Host-plane SSH certificate and starts the approved existing session path. This document does not modify SSHD configuration. |
-| host-admin-shell | Both | Unprivileged front end. Displays the mapped local account, UID and current UTC minute, displays help, parses exact syntax, creates canonical actions, manages staging interaction and returns bounded results. |
+| host-admin-shell | Both | /usr/libexec/custom-shell/host-admin-shell, the unprivileged host-admin front end. Displays the mapped local account, UID and current UTC minute, displays help, parses only the host-admin grammar, creates canonical actions, manages staging interaction and returns bounded results. |
 | host-admin-helper | Phase 1 | Single root-owned privileged executable. Revalidates identity, role, action and parameters and dispatches one internal handler. It accepts no arbitrary command. |
 | host-admin-brokerd | Phase 2 | Privileged policy enforcement point. Verifies UNIX peer credentials, resolves server-side authorization, enforces limits and dispatches handlers. |
 | Host action handlers | Both | Internal modules that implement network, firewall, account, service, RDK-B, diagnostics and approved Host configuration transactions; they are not user-selectable executables. |
@@ -149,6 +150,73 @@ flowchart TD
 9. The trusted audit path independently generates its own event timestamp and records the authorization decision, operation result and applicable before/after state, hashes and rollback status.
 
 10. When Enter is submitted, the shell processes the entered command. An empty command immediately causes a refreshed prompt. After a non-empty command succeeds, fails or is denied, the shell reads the clock again and displays a new prompt with the same verified identity and updated UTC minute.
+
+
+### 3.4 Role-specific shell family
+
+The product shall provide one customized-shell entry point per role, not one shell per individual human user. Multiple authenticated users holding the same role use the same role-specific executable while retaining distinct local UID and audit identity.
+
+| **Role** | **Shell executable** | **Login plane** | **State-changing boundary** |
+|----------|----------------------|-----------------|-----------------------------|
+| host-admin | /usr/libexec/custom-shell/host-admin-shell | Host | Approved Host resources only |
+| it-admin | /usr/libexec/custom-shell/it-admin-shell | ITns | Approved ITns resources only |
+| ot-admin | /usr/libexec/custom-shell/ot-admin-shell | OTns | Approved OTns resources only |
+| dmz-admin | /usr/libexec/custom-shell/dmz-admin-shell | DMZns | Approved DMZns resources only |
+| auditor | /usr/libexec/custom-shell/auditor-shell | Host | None; approved read-only access |
+| ot-operator | /usr/libexec/custom-shell/ot-operator-shell | OTns | Limited approved operational actions; no configuration changes |
+
+The generic user-facing executable name sshd-rbac-shell shall not be used. Each role executable registers only its own command domains and presents only role-permitted help. In particular:
+
+- auditor-shell has no config edit, config set, config apply or service restart grammar.
+
+- ot-operator-shell has no configuration-changing grammar and exposes only approved status, log and limited operational actions.
+
+- Administrative shells expose only resources whose config-ID plane matches their assigned plane.
+
+#### 3.4.1 Shared internal core
+
+Role-specific entry points may share a root-owned, integrity-protected internal library for tokenization, prompt rendering, UTC time formatting, bounded I/O, audit serialization, config-ID parsing and helper communication. Sharing internal code does not make the user-facing shell generic.
+
+The role executable supplies a build-time profile constant and registers a reduced grammar. It shall not accept --role, --plane, switch-role or an equivalent runtime role-selection input. Role authorization must not rely on argv[0], a symlink name or a profile field submitted by the user.
+
+The common core and all role executables shall be versioned and tested together. A role-specific wrapper shall not be a writable script and shall not pass user input into a common POSIX shell.
+
+#### 3.4.2 Trusted role and plane enforcement
+
+The authenticated identity and role-to-plane mapping select the role-specific shell through the approved existing session mechanism. Host, ITns and DMZns use their protected account/identity mapping. OTns uses its certificate and local-account mapping because OT has no SSSD, LDAP or Internet dependency.
+
+Every privileged request includes a non-authoritative shell-profile identifier for consistency checking. The Phase 1 helper or Phase 2 broker independently derives the authenticated UID, authorized role and login plane from protected context and applies server-side policy. It shall reject and audit:
+
+- A user executing or copying another role's shell entry point.
+
+- A shell-profile identifier that does not match the authorized role.
+
+- A config, service or resource ID whose plane does not match the authorized role and login plane.
+
+- A request containing a caller-selected role, plane, helper, adapter or executable.
+
+Direct execution of another role's shell may expose that shell's help text, but it cannot grant additional privileged operations because the helper or broker reauthorizes every action.
+
+#### 3.4.3 Plane-local privileged execution
+
+Role-specific shells connect only to the privileged execution endpoint for their login plane. There is no global write-capable helper spanning Host, ITns, OTns and DMZns.
+
+| **Plane** | **Role shells** | **Privileged scope** |
+|-----------|-----------------|----------------------|
+| Host | host-admin-shell, auditor-shell | Host write policy for host-admin; read-only policy for auditor; approved namespace read gateway |
+| ITns | it-admin-shell | ITns-local resources |
+| DMZns | dmz-admin-shell | DMZns-local resources |
+| OTns | ot-admin-shell, ot-operator-shell | OTns write policy for ot-admin; limited operation policy for ot-operator |
+
+This host-admin document continues to specify the Host-plane host-admin-shell and its Phase 1 helper. The other shells require their own role policy and acceptance profile but shall follow the shared identity, parser, prompt, audit and anti-bypass requirements defined here.
+
+The prompt remains role-neutral as previously approved:
+
+~~~text
+<local-account>:<uid> [<YYYY-MM-DDTHH:MMZ>] hostctl>
+~~~
+
+Role and plane are mandatory protected audit fields but are not displayed in the prompt.
 
 ## 4 Host Admin Permission Model
 
@@ -471,6 +539,7 @@ Certificate renewal is limited to the DUT Host-plane certificate. The handler de
 | **Threat** | **Failure mode** | **Required control** |
 |------------|------------------|----------------------|
 | Shell escape | Pipes, redirection, substitution or interpreter execution reaches arbitrary commands. | No POSIX shell evaluation; exact grammar; no raw executable action; bounded output and fixed PAGER behavior. |
+| Role-shell substitution | A user directly invokes another role's shell or supplies a different role/plane profile. | Separate role executables with reduced grammars plus independent helper/broker UID, role, plane and action authorization; no runtime role switch. |
 | Prompt spoofing | User-controlled identity, environment or control characters make the prompt show a false username or misleading time. | Identity from authenticated context, time from system UTC clock, restricted field character set, fixed formatting and no user overrides. |
 | Editor escape | Vim escape or alternate-file commands bypass the customized-shell interface. | Restricted Vim on the candidate only, permanent unprivileged UID, dedicated SELinux editor domain, clean environment and independent helper/broker authorization. |
 | Privileged editor | Vim or another general editor executes with elevated privilege. | Explicitly prohibited; the privileged backend prepares and applies, while the editor runs only as the authenticated user. |
@@ -574,6 +643,11 @@ role: host-admin
 identity:
   local_user: hostadmin
   principal_pattern: host-admin@kms-<device-id>
+shell:
+  executable: /usr/libexec/custom-shell/host-admin-shell
+  profile: host-admin
+  plane: host
+  runtime_role_selection: denied
 execution:
   phase: phase1-helper
   helper: /usr/libexec/host-admin-helper
@@ -641,6 +715,10 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 |--------|------------------|---------------------|
 | AUTH-01 | A valid device-bound Host-plane host-admin certificate reaches the customized shell through DMZNS. | Pass |
 | AUTH-02 | A DMZNS-only, wrong-plane, wrong-role, expired or wrong-device certificate is rejected by Host SSHD. | Pass |
+| ROLE-01 | host-admin, it-admin, ot-admin, dmz-admin, auditor and ot-operator have separate shell executables and reduced role grammars. | Pass |
+| ROLE-02 | --role, --plane, switch-role, executable-name manipulation and caller-supplied shell profiles cannot change authorization. | Pass |
+| ROLE-03 | Direct execution of another role shell cannot exceed the caller's server-derived role and plane policy and is denied/audited on mismatch. | Pass |
+| ROLE-04 | Each role shell reaches only its plane-local privileged endpoint; no global write-capable cross-plane helper exists. | Pass |
 | SHELL-01 | bash, sh, user-facing sudo, su, pipes, redirection, command substitution and interpreter execution are rejected and audited. | Pass |
 | SHELL-02 | Unknown commands, options, duplicate options and overlong input are rejected before privileged execution. | Pass |
 | UI-01 | Every prompt displays only the mapped local account, numeric UID and UTC minute using the fixed <local-account>:<uid> [YYYY-MM-DDTHH:MMZ] format; the human account is not displayed. | Pass |
@@ -681,7 +759,7 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 
 | **Work product** | **Phase** | **Required content** |
 |------------------|-----------|----------------------|
-| Shell | Both | /usr/libexec/sshd-rbac-shell with trusted local-account/UID/current-time prompt, host-admin grammar, canonical action construction, help, edit orchestration and bounded output. |
+| Shell | Both | /usr/libexec/custom-shell/host-admin-shell with trusted local-account/UID/current-time prompt, host-admin-only grammar, canonical action construction, help, edit orchestration and bounded output; shared code is internal and not a generic user-facing shell. |
 | Privileged helper | Phase 1 | /usr/libexec/host-admin-helper as one root-owned executable with server-side policy, independent validation, internal handler dispatch and protected audit. |
 | Broker | Phase 2 | host-admin-brokerd UNIX-socket service with peer-credential validation, the same canonical action schema and handler dispatch. |
 | Configuration workflow | Both | Config-ID resource-profile catalog, fixed backend adapters, profile-specific edit modes, protected transaction metadata, optional user-owned staging, typed validators, canonical state/revision tracking, apply, health check and rollback/compensation. |
@@ -704,6 +782,8 @@ The following values are deployment policy, not architecture changes. They must 
 - Allowlisted Host services and the health check for each service.
 
 - Permitted Host configuration IDs and resource profiles, backend types and protected locators, supported operations/edit modes, schemas, concurrency tokens, persistence scope, health checks, audit redaction and rollback/compensation rules, including SSHD and SSSD activation and rollback rules.
+
+- Role-to-shell mapping for all six roles, role-specific grammar manifests, shared-core versioning, helper/broker role-mismatch behavior and plane-local execution endpoints.
 
 - Prompt local-account/UID source, separate audit-only human identity mapping, fixed character set, YYYY-MM-DDTHH:MMZ rendering, login/Enter/completion refresh behavior and clock-failure behavior.
 
@@ -736,7 +816,7 @@ Configuration editing is the first complete Phase 1 feature slice. The initial h
 | **Work package** | **Scope** | **Checkpoint and required evidence** |
 |------------------|-----------|--------------------------------------|
 | P1.0 Contract freeze | Freeze config action schema, prompt behavior, identity context, audit schema, policy format and the real host.network.hosts config ID. | CP0: reviewed schemas, /etc/hosts policy, validator, health check, rollback and test matrix; no SSHD change. |
-| P1.1 Minimal shell | Implement prompt, config grammar, help, time status and exit only; reject shell syntax and arbitrary paths. | CP1: parser tests, prompt transcript and rejection audit records pass. |
+| P1.1 Minimal shell | Implement /usr/libexec/custom-shell/host-admin-shell with prompt, host-admin config grammar, help, time status and exit only; reject shell syntax, role switching and arbitrary paths. | CP1: parser, role-mismatch, prompt and rejection-audit tests pass. |
 | P1.2 Single helper skeleton | Install one root-owned helper with config-only dispatch, protected identity lookup and policy validation. | CP2: direct invocation cannot exceed policy; arbitrary commands/actions are rejected and audited. |
 | P1.3 Config catalog/read | Implement config.list/show and map host.network.hosts to the real Host-plane /etc/hosts target. | CP3: canonical mapping, raw-path denial, protected-entry enforcement, secret-target denial and namespace-write denial pass. |
 | P1.4 Stage and edit | Create protected transaction metadata and a mode-0600 user-owned candidate; run restricted Vim as the user under host_admin_editor_t. | CP4: Vim is never root, writes only the candidate, cannot escape its SELinux boundary and editor exit does not apply. |
@@ -879,7 +959,7 @@ Every later work package reuses the action, identity, policy, audit and failure 
 
 ## Appendix A SSHD Configuration Preservation
 
-This revision shall not add, remove or modify any SSHD directive. The deployed SSHD configuration remains the approved current baseline and is outside the scope of this change. Command audit logging and staged configuration editing shall be implemented entirely in the customized shell, Phase 1 helper or Phase 2 broker, configuration staging manager and protected logging service. Any future deployed SSHD configuration change requires a separate authorized host-admin transaction or design review, validation and controlled deployment.
+This revision shall not add, remove or modify any SSHD directive. The deployed SSHD configuration remains the approved current baseline and is outside the scope of this change. Role-specific shell selection shall use the approved existing session/account mapping; if that mapping cannot select the required executable, the necessary SSHD change requires a separate design review. Command audit logging and staged configuration editing shall be implemented entirely in the customized shell, Phase 1 helper or Phase 2 broker, configuration staging manager and protected logging service. Any future deployed SSHD configuration change requires a separate authorized host-admin transaction or design review, validation and controlled deployment.
 
 ## Appendix B Recommended Audit Event Example
 
