@@ -4,14 +4,14 @@ _IT OT Separation SSHD RBAC_
 
 | **Document status** | Design baseline   |
 |---------------------|-------------------|
-| **Version**         | 1.4               |
+| **Version**         | 1.5               |
 | **Date**            | 15 September 2026 |
 | **Role**            | host-admin        |
 | **Target plane**    | DUT Host plane    |
 
 **Decision summary.** The host-admin receives a forced, allowlist-based administration shell on the Host plane. The role can manage approved Host networking, accounts, services, RDK-B parameters, approved Host configuration and Host certificates. It can harvest logs and inspect redacted configuration from ITns, OTns and DMZns, but cannot modify those namespaces.
 
-Delivery uses two phases while preserving one command grammar, one policy model and one audit schema. Phase 1 uses the unprivileged customized shell with one root-owned privileged helper. Phase 2 replaces that execution path with one confined UNIX-socket broker. Approved Host configuration may be edited with restricted Vim only on a user-owned staging copy; the helper or broker independently validates and atomically installs it. Neither phase provides an unrestricted root shell. At login and whenever the prompt is redisplayed, the shell shows the verified human username, mapped local account and current system time in UTC with minute precision. The time does not tick while the shell waits for input.
+Delivery uses two phases while preserving one command grammar, one policy model and one audit schema. Phase 1 uses the unprivileged customized shell with one root-owned privileged helper. Phase 2 replaces that execution path with one confined UNIX-socket broker. Approved Host configuration may be edited with restricted Vim only on a user-owned staging copy; the helper or broker independently validates and atomically installs it. Neither phase provides an unrestricted root shell. At login and whenever the prompt is redisplayed, the shell shows only the mapped local account, numeric UID and current system time in UTC with minute precision. The time does not tick while the shell waits for input.
 
 ## 1 Purpose and Scope
 
@@ -37,7 +37,7 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 
 - Permit restricted Vim editing only for approved Host configuration IDs through a validated staging workflow.
 
-- Display the authenticated human username, mapped local identity and freshly read UTC system time in every command prompt.
+- Display only the mapped local account, numeric UID and freshly read UTC system time in every command prompt. The authenticated human identity remains audit-only.
 
 ### 1.3 Non goals
 
@@ -67,7 +67,8 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 | D9 | Protected evidence | Logs and time are readable but immutable to host-admin. Malformed, denied, successful and failed requests are audited. |
 | D10 | Constrained certificate renewal | host-admin may renew the fixed Host-plane device certificate, but cannot choose identity, CA role, principal, TTL or key export behavior. |
 | D11 | Stable migration contract | Command syntax, action IDs, validators, role policy, event IDs and audit fields remain compatible across both phases. |
-| D12 | Trusted prompt identity and time | The prompt displays the verified human username, mapped local account and current UTC system time with minute precision. It refreshes at login, after Enter is submitted and after command completion; it does not tick while input is active. Values come from trusted sources and cannot be supplied by the user. |
+| D12 | Trusted prompt identity and time | The prompt displays only the mapped local account, numeric UID and current UTC system time with minute precision. It refreshes at login, after Enter is submitted and after command completion; it does not tick while input is active. Values come from trusted sources and cannot be supplied by the user. The human account remains in protected audit data only. |
+| D13 | Configuration-edit-first gate | Phase 1 implements and accepts the complete Host configuration edit transaction before enabling other state-changing Phase 1 domains. |
 
 *Table 1 Core design decisions*
 
@@ -115,7 +116,7 @@ flowchart TD
 | **Component** | **Phase** | **Responsibility** |
 |---------------|-----------|--------------------|
 | Host SSHD | Both | Authenticates the Host-plane SSH certificate and starts the approved existing session path. This document does not modify SSHD configuration. |
-| host-admin-shell | Both | Unprivileged front end. Displays verified identity and current UTC time, displays help, parses exact syntax, creates canonical actions, manages staging interaction and returns bounded results. |
+| host-admin-shell | Both | Unprivileged front end. Displays the mapped local account, UID and current UTC minute, displays help, parses exact syntax, creates canonical actions, manages staging interaction and returns bounded results. |
 | host-admin-helper | Phase 1 | Single root-owned privileged executable. Revalidates identity, role, action and parameters and dispatches one internal handler. It accepts no arbitrary command. |
 | host-admin-brokerd | Phase 2 | Privileged policy enforcement point. Verifies UNIX peer credentials, resolves server-side authorization, enforces limits and dispatches handlers. |
 | Host action handlers | Both | Internal modules that implement network, firewall, account, service, RDK-B, diagnostics and approved Host configuration transactions; they are not user-selectable executables. |
@@ -133,7 +134,7 @@ flowchart TD
 
 2. SSHD maps the session to the locked local account hostadmin and starts the customized shell.
 
-3. The shell obtains the verified human account from authenticated session context and the mapped local account and numeric UID from protected identity mapping. These values are not read from user command input or user-controlled environment variables.
+3. The shell obtains the mapped local account and numeric UID from protected identity mapping for the visible prompt. It separately retains the verified human account from authenticated session context for protected audit records. None of these values are read from user command input or user-controlled environment variables.
 
 4. At initial login, the shell reads the system clock, converts it to UTC minute precision and renders the fixed prompt format defined in Section 5.1.
 
@@ -194,23 +195,23 @@ The shell exposes a namespaced command grammar. The parser accepts only document
 
 ### 5.1 Shell prompt
 
-The prompt shall display both the verified human account and mapped local account because multiple human administrators may terminate as the same local hostadmin identity. It shall also display the current system time in UTC with minute precision. The fixed format is:
+The prompt shall display only the mapped local account, numeric UID and current system time in UTC with minute precision. The verified human account is intentionally not displayed and remains available only to the protected audit path. The fixed format is:
 
 ~~~text
-<human-account>(<local-account>:<uid>) [<YYYY-MM-DDTHH:MMZ>] hostctl>
+<local-account>:<uid> [<YYYY-MM-DDTHH:MMZ>] hostctl>
 ~~~
 
 Example:
 
 ~~~text
-hostadmin01(hostadmin:10000) [2026-09-15T09:42Z] hostctl>
+hostadmin:10000 [2026-09-15T09:42Z] hostctl>
 ~~~
 
 The displayed time is a prompt snapshot, not a live clock. It is generated at initial login and refreshed when Enter is submitted: an empty command redraws it immediately, while a non-empty command redraws it after the command completes, fails or is denied. It does not tick or redraw while the administrator is typing or while a command is running. Minute precision is required for the prompt; audit records independently retain UTC RFC 3339 timestamps with sub-second precision. The literal Z timezone marker is required so the displayed time cannot be confused with local time.
 
 No background ticker, timerfd, periodic signal or asynchronous ANSI status-line redraw is required. A normal blocking input loop is sufficient.
 
-The human account, local account and UID shall be obtained from authenticated session context and protected identity mapping. User input, environment variables, terminal escape sequences and configuration-editor content cannot override them. Prompt fields shall use a restricted character set and fixed formatting so account data cannot inject terminal control characters.
+The local account and UID displayed in the prompt shall be obtained from protected identity mapping. The human account shall be obtained from authenticated session context for audit use but shall not be rendered in the prompt. User input, environment variables, terminal escape sequences and configuration-editor content cannot override either identity context. Visible prompt fields shall use a restricted character set and fixed formatting so account data cannot inject terminal control characters.
 
 The displayed timestamp is informational and shall not be copied into the audit record. The protected audit path independently reads the system UTC clock when creating each event. host-admin may view clock synchronization status through hostctl time status but cannot set time, timezone or the time source.
 
@@ -487,7 +488,7 @@ execution:
   helper: /usr/libexec/host-admin-helper
   broker_socket: /run/custom-shell/host-admin-broker.sock
 display:
-  prompt_identity: human-and-local
+  prompt_identity: local-account-and-uid
   prompt_uid: true
   prompt_time: utc-iso8601-minute
   refresh: login-enter-command-completion
@@ -549,7 +550,7 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 | AUTH-02 | A DMZNS-only, wrong-plane, wrong-role, expired or wrong-device certificate is rejected by Host SSHD. | Pass |
 | SHELL-01 | bash, sh, user-facing sudo, su, pipes, redirection, command substitution and interpreter execution are rejected and audited. | Pass |
 | SHELL-02 | Unknown commands, options, duplicate options and overlong input are rejected before privileged execution. | Pass |
-| UI-01 | Every prompt displays the verified human account, mapped local account, numeric UID and UTC minute using the fixed YYYY-MM-DDTHH:MMZ format. | Pass |
+| UI-01 | Every prompt displays only the mapped local account, numeric UID and UTC minute using the fixed <local-account>:<uid> [YYYY-MM-DDTHH:MMZ] format; the human account is not displayed. | Pass |
 | UI-02 | The UTC minute is generated at login, refreshed immediately after an empty Enter, and refreshed after every successful, failed or denied command; it never ticks or redraws while input or command execution is active. | Pass |
 | UI-03 | User commands, environment variables, terminal control characters and staged configuration content cannot alter or spoof prompt identity or time. | Pass |
 | UI-04 | The prompt timestamp is not trusted as the audit timestamp; audit events independently obtain UTC RFC 3339 timestamps with sub-second precision. | Pass |
@@ -584,7 +585,7 @@ Changing execution.phase from phase1-helper to phase2-broker shall not change th
 
 | **Work product** | **Phase** | **Required content** |
 |------------------|-----------|----------------------|
-| Shell | Both | /usr/libexec/sshd-rbac-shell with trusted username/current-time prompt, host-admin grammar, canonical action construction, help, edit orchestration and bounded output. |
+| Shell | Both | /usr/libexec/sshd-rbac-shell with trusted local-account/UID/current-time prompt, host-admin grammar, canonical action construction, help, edit orchestration and bounded output. |
 | Privileged helper | Phase 1 | /usr/libexec/host-admin-helper as one root-owned executable with server-side policy, independent validation, internal handler dispatch and protected audit. |
 | Broker | Phase 2 | host-admin-brokerd UNIX-socket service with peer-credential validation, the same canonical action schema and handler dispatch. |
 | Configuration workflow | Both | Config-ID catalog, protected transaction metadata, user-owned staging copy, restricted Vim profile, validators, backup, atomic apply, health check and rollback. |
@@ -608,7 +609,7 @@ The following values are deployment policy, not architecture changes. They must 
 
 - Permitted Host configuration IDs, destination mappings, protected directives and validators, including SSHD and SSSD activation and rollback rules.
 
-- Prompt identity source and authenticated human-to-local mapping, fixed character set, YYYY-MM-DDTHH:MMZ rendering, login/Enter/completion refresh behavior and clock-failure behavior.
+- Prompt local-account/UID source, separate audit-only human identity mapping, fixed character set, YYYY-MM-DDTHH:MMZ rendering, login/Enter/completion refresh behavior and clock-failure behavior.
 
 - Restricted Vim package availability, root-owned profile, disabled features and staging transaction lifetime.
 
@@ -628,6 +629,99 @@ The following values are deployment policy, not architecture changes. They must 
 
 - Certificate renewal threshold, TTL, retry policy and health-monitoring behavior.
 
+
+
+## 14 Phase 1 Work Breakdown and Checkpoints
+
+### 14.1 Delivery rule
+
+Configuration editing is the first complete Phase 1 feature slice. Until the Configuration Edit Gate is accepted, no service restart, network/firewall write, account lifecycle, RDK-B set, certificate renewal or namespace state-changing action may be enabled. The current SSHD configuration remains unchanged, and SSHD/SSSD config IDs remain disabled during this first gate.
+
+| **Work package** | **Scope** | **Checkpoint and required evidence** |
+|------------------|-----------|--------------------------------------|
+| P1.0 Contract freeze | Freeze config action schema, prompt behavior, identity context, audit schema, policy format and pilot config ID. | CP0: reviewed schemas, pilot policy, validators and test matrix; no SSHD change. |
+| P1.1 Minimal shell | Implement prompt, config grammar, help, time status and exit only; reject shell syntax and arbitrary paths. | CP1: parser tests, prompt transcript and rejection audit records pass. |
+| P1.2 Single helper skeleton | Install one root-owned helper with config-only dispatch, protected identity lookup and policy validation. | CP2: direct invocation cannot exceed policy; arbitrary commands/actions are rejected and audited. |
+| P1.3 Config catalog/read | Implement config.list/show and logical config-ID mapping using host.test-config first. | CP3: canonical mapping, raw-path denial, secret-target denial and namespace-write denial pass. |
+| P1.4 Stage and edit | Create protected transaction metadata and a mode-0600 user-owned candidate; run restricted Vim as the user under host_admin_editor_t. | CP4: Vim is never root, writes only the candidate, cannot escape its SELinux boundary and editor exit does not apply. |
+| P1.5 Validate and diff | Apply config-specific validation, protected-directive checks, candidate/original hashes and redacted bounded diff. | CP5: invalid, stale, mutated and concurrent candidates are rejected without target change. |
+| P1.6 Atomic apply/rollback | Reauthorize apply, create backup, replace atomically, restore metadata/label, health-check and roll back on failure. | CP6: success, replay denial, failure injection and rollback evidence pass. |
+| P1.7 Audit and recovery | Cover malformed, denied, successful, failed, discarded and rolled-back events; enforce limits and fail-closed behavior. | CP7: JSONL coverage, tamper resistance, quotas and recovery tests pass. |
+| P1.CFG | End-to-end Configuration Edit Gate | Go/no-go review with CP0–CP7 evidence, policy/catalog versions, hashes, representative audit chain and signed decision. |
+
+### 14.2 Configuration Edit Gate command scope
+
+Only the following administrative interface is required for the initial vertical slice:
+
+~~~text
+hostctl config list
+hostctl config show <config-id>
+hostctl config edit <config-id>
+hostctl config validate <edit-request-id>
+hostctl config diff <edit-request-id>
+hostctl config apply <edit-request-id>
+hostctl config discard <edit-request-id>
+hostctl time status
+hostctl help
+hostctl exit
+~~~
+
+The visible prompt shall be:
+
+~~~text
+<local-account>:<uid> [<YYYY-MM-DDTHH:MMZ>] hostctl>
+~~~
+
+Example:
+
+~~~text
+hostadmin:10000 [2026-09-15T09:42Z] hostctl>
+~~~
+
+The prompt is generated at login, refreshed after an empty Enter and refreshed after a submitted command completes, fails or is denied. It does not tick while the user types or while the command runs. The verified human account remains present in protected audit records but is not shown in the prompt.
+
+### 14.3 Pilot order
+
+1. Use host.test-config mapped to an isolated non-production target to prove the complete mechanism.
+
+2. After CP0–CP7 pass, enable one separately approved low-risk Host config ID with its own validator, backup, health check and rollback policy.
+
+3. Keep SSHD and SSSD editing disabled throughout the first gate. Their deployed hashes must remain unchanged.
+
+4. Reject all raw paths, ITns/OTns/DMZns write targets, secret-bearing full-file targets, audit paths, policy files, key material and executable paths.
+
+### 14.4 Gate decision
+
+**Go criteria**
+
+- CP0 through CP7 pass with traceable evidence.
+
+- list, show, edit, validate, diff, apply and discard pass end to end.
+
+- Restricted Vim, SELinux, identity, atomicity, rollback and audit negative tests pass.
+
+- The single helper exposes no arbitrary executable, command or path interface.
+
+- The deployed SSHD/SSSD hashes and all namespace configurations remain unchanged.
+
+**No-go behavior**
+
+A failed criterion keeps every other state-changing Phase 1 handler disabled. Correct the failed work package, repeat its checkpoint and regress all earlier checkpoints.
+
+### 14.5 Remaining Phase 1 work after gate acceptance
+
+| **Work package** | **Capability** | **Checkpoint** |
+|------------------|----------------|----------------|
+| P1.8 | Read-only system/network diagnostics and bounded capture | Target, duration, output and audit limits pass. |
+| P1.9 | Service status/reload/restart | Allowlist, stop/disable/mask denial, rate limit and health check pass. |
+| P1.10 | Host network/firewall transactions | Isolation invariants, dry-run, management-path verification and rollback pass. |
+| P1.11 | Host-local account lifecycle | UID/GID allocation, privileged-group denial and lifecycle audit pass. |
+| P1.12 | RDK-B get/set | Parameter allowlist, type/range validation, redaction and failure handling pass. |
+| P1.13 | Host certificate status/renewal | Fixed identity, TPM key, chain validation and revoke/delete/export denial pass. |
+| P1.14 | Host/namespace log harvest and namespace config visibility | Read-only collection, redaction, integrity manifest and no namespace-shell exposure pass. |
+| P1.15 | Integrated Phase 1 release | Full regression, SELinux, resource-exhaustion, recovery and security review pass. |
+
+Every later work package reuses the action, identity, policy, audit and failure contracts accepted by the Configuration Edit Gate and cannot weaken the customized-shell/single-helper boundary.
 
 ## Appendix A SSHD Configuration Preservation
 
