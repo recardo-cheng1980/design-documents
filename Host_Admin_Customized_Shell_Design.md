@@ -605,6 +605,10 @@ The prompt timestamp and audit timestamp are separate reads of the same protecte
 
 Every command execution attempt, including malformed, unauthorized, denied, successful and failed commands, shall be logged in `/var/log/custom-shell/${role}-${uid}.log`. Every record shall contain `source.credential_id`, `source.local_account` and `source.uid`. The shell and privileged execution backend shall derive these fields, role and UID from the authenticated session and protected server-side identity mapping; none may be supplied or overridden by the user. For the host-admin account defined by this design, UID 10000 therefore writes to `/var/log/custom-shell/host-admin-10000.log`.
 
+Exactly one protected command-completion record shall be emitted for every submitted non-empty input line, including `hostctl help`, `hostctl time status`, `hostctl exit`, all catalog/edit commands, disabled P1 actions, malformed syntax and unknown commands. Parser-only commands and rejections shall be forwarded to the same trusted audit writer as helper/broker actions; journald-only records are supplementary and do not satisfy this requirement. The `command` field contains the full entered command after JSON-safe sanitization and bounded-length validation. No candidate content, private key, token, password or other secret is retained in command history or audit output.
+
+The trusted session initializer shall write `session.login` before the role shell starts and `session.logout` after it exits. These session events include the same protected identity fields; logout additionally includes duration and exit status. They complement, and never replace, the per-command completion records.
+
 The file shall use JSON Lines format with one complete audit record per line. A completion record shall be written after command processing so that event_result reflects the final outcome. A failed event shall include a non-secret failed_reason that is specific enough for operations and investigation; a successful event shall omit failed_reason or set it to null.
 
 | **Field**            | **Required content**                                                                                                              |
@@ -1065,4 +1069,3 @@ Restricted Vim is permitted only while all of the following remain true:
 - Editor exit alone never changes the protected target; apply is an explicit audited action.
 
 A failure of any baseline condition disables config edit for the affected config ID and leaves config show, validate of already-staged content where safe and discard available according to policy.
-
