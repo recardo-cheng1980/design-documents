@@ -4,7 +4,7 @@ _IT OT Separation SSHD RBAC_
 
 | **Document status** | Design baseline   |
 |---------------------|-------------------|
-| **Version**         | 1.6               |
+| **Version**         | 1.7               |
 | **Date**            | 15 September 2026 |
 | **Role**            | host-admin        |
 | **Target plane**    | DUT Host plane    |
@@ -62,7 +62,7 @@ The DUT separates Host, ITns, OTns and DMZns into distinct security planes. A ho
 | D4 | Host-plane write boundary | host-admin can change approved Host resources and host-side inter-zone enforcement, but cannot change configuration inside ITns, OTns or DMZns. |
 | D5 | Cross-namespace read gateway | host-admin may harvest approved logs and inspect approved redacted configuration from all namespaces through a dedicated read-only gateway. |
 | D6 | No raw high-risk tools | Write-capable nft, tc, ebtables, systemctl, dmcli and account-management operations are exposed only as validated actions. |
-| D7 | Controlled Host configuration editing | Configuration is selected by logical config ID, edited only as a user-owned staging copy, independently validated and atomically installed by the privileged execution backend. |
+| D7 | Controlled Host configuration editing | Configuration is selected by a hierarchical <plane>.<domain>.<resource> logical config ID, edited only as a user-owned staging copy, independently validated and atomically installed by the privileged execution backend. Each ID maps to exactly one protected target profile. |
 | D8 | Restricted Vim is transitional | Phase 1 may use restricted Vim for the staging copy only. Vim never runs as root and is not the authorization or installation boundary. |
 | D9 | Protected evidence | Logs and time are readable but immutable to host-admin. Malformed, denied, successful and failed requests are audited. |
 | D10 | Constrained certificate renewal | host-admin may renew the fixed Host-plane device certificate, but cannot choose identity, CA role, principal, TTL or key export behavior. |
@@ -285,6 +285,31 @@ Network changes are policy transactions rather than direct execution of networki
 ### 6.2 Approved Host configuration changes
 
 Approved Host configuration is addressed only by logical configuration ID. Raw destination paths are never accepted from the user. The policy maps each config ID to one canonical target, validator, protected directives, ownership, mode, SELinux label, health check and rollback rule. ITns, OTns and DMZns configuration IDs remain read-only under Section 6.6.
+
+The general config-ID grammar is:
+
+~~~text
+<plane>.<domain>.<resource>
+~~~
+
+- plane identifies the security plane. A host-admin write action accepts only host.
+
+- domain is a stable functional category such as network, system, access or identity.
+
+- resource is a stable logical resource name such as hosts, hostname, sshd or sssd.
+
+Each segment shall use a restricted lowercase identifier grammar and shall not contain slash, backslash, whitespace, control characters, empty segments or traversal notation. A complete config ID is a protected catalog key and maps to exactly one target transaction profile. The user cannot provide a second target/path parameter.
+
+Examples:
+
+| **Config ID** | **Logical purpose** | **Gate status** |
+|---------------|---------------------|-----------------|
+| host.network.hosts | Host static name mappings in /etc/hosts | Enabled for first Configuration Edit Gate |
+| host.system.hostname | Host system hostname configuration | Future, disabled |
+| host.access.sshd | Approved Host SSHD configuration | Future, disabled |
+| host.identity.sssd | Approved Host SSSD configuration | Future, disabled |
+
+A broad ID such as host.config is not sufficient because it would require another user-selected target. That would weaken the one-ID-to-one-target allowlist and is therefore prohibited.
 
 #### 6.2.1 Edit transaction
 
@@ -639,10 +664,10 @@ Configuration editing is the first complete Phase 1 feature slice. Until the Con
 
 | **Work package** | **Scope** | **Checkpoint and required evidence** |
 |------------------|-----------|--------------------------------------|
-| P1.0 Contract freeze | Freeze config action schema, prompt behavior, identity context, audit schema, policy format and the real host.hosts config ID. | CP0: reviewed schemas, /etc/hosts policy, validator, health check, rollback and test matrix; no SSHD change. |
+| P1.0 Contract freeze | Freeze config action schema, prompt behavior, identity context, audit schema, policy format and the real host.network.hosts config ID. | CP0: reviewed schemas, /etc/hosts policy, validator, health check, rollback and test matrix; no SSHD change. |
 | P1.1 Minimal shell | Implement prompt, config grammar, help, time status and exit only; reject shell syntax and arbitrary paths. | CP1: parser tests, prompt transcript and rejection audit records pass. |
 | P1.2 Single helper skeleton | Install one root-owned helper with config-only dispatch, protected identity lookup and policy validation. | CP2: direct invocation cannot exceed policy; arbitrary commands/actions are rejected and audited. |
-| P1.3 Config catalog/read | Implement config.list/show and map host.hosts to the real Host-plane /etc/hosts target. | CP3: canonical mapping, raw-path denial, protected-entry enforcement, secret-target denial and namespace-write denial pass. |
+| P1.3 Config catalog/read | Implement config.list/show and map host.network.hosts to the real Host-plane /etc/hosts target. | CP3: canonical mapping, raw-path denial, protected-entry enforcement, secret-target denial and namespace-write denial pass. |
 | P1.4 Stage and edit | Create protected transaction metadata and a mode-0600 user-owned candidate; run restricted Vim as the user under host_admin_editor_t. | CP4: Vim is never root, writes only the candidate, cannot escape its SELinux boundary and editor exit does not apply. |
 | P1.5 Validate and diff | Apply config-specific validation, protected-directive checks, candidate/original hashes and redacted bounded diff. | CP5: invalid, stale, mutated and concurrent candidates are rejected without target change. |
 | P1.6 Atomic apply/rollback | Reauthorize apply, create backup, replace atomically, restore metadata/label, health-check and roll back on failure. | CP6: success, replay denial, failure injection and rollback evidence pass. |
@@ -681,14 +706,14 @@ hostadmin:10000 [2026-09-15T09:42Z] hostctl>
 The prompt is generated at login, refreshed after an empty Enter and refreshed after a submitted command completes, fails or is denied. It does not tick while the user types or while the command runs. The verified human account remains present in protected audit records but is not shown in the prompt.
 
 
-### 14.3 Real use case: host.hosts
+### 14.3 Real use case: host.network.hosts
 
 The first Configuration Edit Gate shall use the real Host-plane /etc/hosts file. The use case is an authorized administrator adding or updating an approved static hostname mapping required by a Host-plane management service.
 
-The user-facing resource is the logical ID host.hosts. The shell and helper shall not accept /etc/hosts or any other raw path as an argument.
+The user-facing resource is the concrete ID host.network.hosts under the general <plane>.<domain>.<resource> scheme. The shell and helper shall not accept /etc/hosts or any other raw path as an argument.
 
 ~~~yaml
-config_id: host.hosts
+config_id: host.network.hosts
 target: /etc/hosts
 access: staged-edit
 expected_owner: root
@@ -705,8 +730,8 @@ The exact SELinux type and size/line limits are deployment-policy values and sha
 #### Required edit flow
 
 ~~~text
-hostctl config show host.hosts
-hostctl config edit host.hosts
+hostctl config show host.network.hosts
+hostctl config edit host.network.hosts
 hostctl config validate <edit-request-id>
 hostctl config diff <edit-request-id>
 hostctl config apply <edit-request-id>
@@ -746,7 +771,7 @@ After atomic installation, the health check shall:
 
 Because /etc/hosts is consumed through normal resolver calls, this use case does not require a service restart. The audit chain shall include config ID, actor, old/new hashes, redacted diff, validator result, backup ID, apply result, health-check result and rollback status.
 
-SSHD and SSSD config IDs remain disabled throughout this first gate. Their deployed configuration hashes must remain unchanged. After host.hosts passes the gate, each additional Host config ID requires its own target mapping, validator, protected invariants, health check, rollback rules and approval.
+SSHD and SSSD config IDs remain disabled throughout this first gate. Their deployed configuration hashes must remain unchanged. After host.network.hosts passes the gate, each additional Host config ID requires its own target mapping, validator, protected invariants, health check, rollback rules and approval.
 
 ### 14.4 Gate decision
 
