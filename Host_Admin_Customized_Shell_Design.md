@@ -216,7 +216,7 @@ This host-admin document continues to specify the Host-plane host-admin-shell an
 The prompt remains role-neutral as previously approved:
 
 ~~~text
-<local-account>:<uid> [<YYYY-MM-DDTHH:MMZ>] hostctl>
+<local-account>:<uid> [<YYYY-MM-DDTHH:MMZ>] host>
 ~~~
 
 Role and plane are mandatory protected audit fields but are not displayed in the prompt.
@@ -269,13 +269,13 @@ The shell exposes a namespaced command grammar. The parser accepts only document
 The prompt shall display only the mapped local account, numeric UID and current system time in UTC with minute precision. The verified human account is intentionally not displayed and remains available only to the protected audit path. The fixed format is:
 
 ~~~text
-<local-account>:<uid> [<YYYY-MM-DDTHH:MMZ>] hostctl>
+<local-account>:<uid> [<YYYY-MM-DDTHH:MMZ>] host>
 ~~~
 
 Example:
 
 ~~~text
-hostadmin:10000 [2026-09-15T09:42Z] hostctl>
+hostadmin:10000 [2026-09-15T09:42Z] host>
 ~~~
 
 The displayed time is a prompt snapshot, not a live clock. It is generated at initial login and refreshed when Enter is submitted: an empty command redraws it immediately, while a non-empty command redraws it after the command completes, fails or is denied. It does not tick or redraw while the administrator is typing or while a command is running. Minute precision is required for the prompt; audit records independently retain UTC RFC 3339 timestamps with sub-second precision. The literal Z timezone marker is required so the displayed time cannot be confused with local time.
