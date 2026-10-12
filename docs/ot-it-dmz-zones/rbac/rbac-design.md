@@ -5,7 +5,7 @@ uncommitted working-tree changes, as of 2026-10-12. It documents what exists and
 It does not propose new code.
 **Supersedes (for the model):** `docs/ot-it-dmz-zones-rbac/design.md` (2026-09-03, broker/root-shell model; see section 9).
 **Builds on:** `ssh-rbac-design.md` (authoritative for planes, CA trust, and login flows).
-**Diagrams:** `docs/ot-it-dmz-zones-rbac/RBAC/` (`ldap online.png`, `offline.png`, `RBAC summary.png`), summarized in section 2.1.
+**Diagrams:** this directory (`ldap online.png`, `offline.png`, `RBAC summary.png`), summarized in section 2.1.
 **Related plans:** `docs/host-admin-shell/*`, `docs/otit-host-admin-login-account-mapping-plan.md`,
 `docs/otit-auditor-and-direct-namespace-access-plan.md`.
 **Tests:** `tests/dut/host-admin-shell/`, `tests/dut/host-admin-account-migration/`, `tests/dut/ot-it-dmz-zones-rbac/`.
@@ -43,7 +43,7 @@ LDAP User 2 identities are never written to local `/etc/passwd`. User 1 accounts
 
 ### 2.1 Login paths (online and offline)
 
-Diagrams: [`RBAC/ldap online.png`](RBAC/ldap%20online.png), [`RBAC/offline.png`](RBAC/offline.png), [`RBAC/RBAC summary.png`](RBAC/RBAC%20summary.png).
+Diagrams: [`ldap online.png`](ldap%20online.png), [`offline.png`](offline.png), [`RBAC summary.png`](RBAC%20summary.png).
 Both modes end in the same place for each role. They differ only in how the **first hop** is authenticated.
 **Second hop to Host/OTNS is always a plane-specific certificate**, never a password.
 
