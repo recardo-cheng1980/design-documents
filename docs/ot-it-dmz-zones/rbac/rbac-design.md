@@ -1,14 +1,8 @@
 # Consolidated RBAC Design and Host-Admin Custom Shell
 
-**Status:** descriptive. Derived from the code and plan docs on branch `feat/rbac3-shell`, including its
-uncommitted working-tree changes, as of 2026-10-12. It documents what exists and lists open gaps.
-It does not propose new code.
-**Supersedes (for the model):** `docs/ot-it-dmz-zones-rbac/design.md` (2026-09-03, broker/root-shell model; see section 9).
-**Builds on:** `ssh-rbac-design.md` (authoritative for planes, CA trust, and login flows).
-**Diagrams:** this directory (`ldap online.png`, `offline.png`, `RBAC summary.png`), summarized in section 2.1.
-**Related plans:** `docs/host-admin-shell/*`, `docs/otit-host-admin-login-account-mapping-plan.md`,
-`docs/otit-auditor-and-direct-namespace-access-plan.md`.
-**Tests:** `tests/dut/host-admin-shell/`, `tests/dut/host-admin-account-migration/`, `tests/dut/ot-it-dmz-zones-rbac/`.
+**Status:** descriptive and reviewed. Documents the implementation as reviewed on 2026-10-12, including recent changes not yet verified on the DUT, and compares it with the baseline design.
+**Baseline design:** `Host_Admin_Customized_Shell_Design.md` (same directory, version 2.0, 15 September 2026). Section 7.3 lists where the implementation differs from it.
+**Diagrams:** `ldap online.png`, `offline.png`, `RBAC summary.png` (same directory), summarized in section 2.1.
 
 ## 1. Goals
 
@@ -23,7 +17,7 @@ It does not propose new code.
 |---|---|---|
 | DMZNS | SSH 2220 (LDAP password or DMZ-CA cert) | host-admin, auditor, ot-admin, ot-operator, dmz-admin |
 | Host | `172.31.0.1:22`, DMZ conduit only, cert only | host-admin, auditor (via DMZNS second hop) |
-| OTNS | `172.31.0.10`, DMZ conduit only, cert only | ot-admin, ot-operator |
+| OTNS | `172.31.0.10:22`, DMZ conduit only, cert only | ot-admin, ot-operator |
 | ITNS | SSH 2230 | it-admin (direct) |
 
 | Role | GID | Local cert user (User 1) | UID | LDAP user (User 2) | Final landing |
@@ -35,9 +29,8 @@ It does not propose new code.
 | dmz-admin | 6003 | `dmzadmin` | 10200 | `dmzadmin01` | DMZNS only |
 | it-admin | 6002 | `itadmin` | 10600 | `itadmin01` | ITNS only |
 
-UID/GID allocation ranges (hard ownership boundary): fixed role accounts 10000-11999;
-Host dynamic accounts 30000-39999; OTns 40000-49999; DMZns 50000-59999; ITns 60000-65533.
-The Host account handler never allocates or touches ranges outside 30000-39999.
+Fixed role accounts use the UIDs in the table. Dynamic accounts are allocated by namespace:
+Host 30000-39999, OTns 40000-49999, DMZns 50000-59999, ITns 60000-65533. The Host account handler never allocates or modifies IDs outside 30000-39999.
 
 LDAP User 2 identities are never written to local `/etc/passwd`. User 1 accounts are locked, certificate-only, with private homes.
 
@@ -101,15 +94,13 @@ Online first hop **requires LDAP/AD to be reachable**. ITNS and DMZNS roles end 
 5. DMZNS opens the second hop with the Host or OTNS certificate.
 6. The target validates its plane certificate and applies the role.
 
-The offline diagram places an applicant portal and backend in front of the KMS. `ssh-rbac-design.md` describes the workstation calling
-the KMS signing API directly. Treat the portal/backend as an authentication and policy layer in front of that API. The caller still cannot choose the Vault mount, role, principal,
-target or TTL.
+The portal and backend act as an authentication and policy layer in front of the KMS signing API. The requester cannot choose the Vault mount, signing role, principal, target or TTL. Those are server-side policy.
 
 **Same account name, different credential.** The online user (`hostadmin01`) and the offline user (`hostadmin`) are different identities that map to the same role group.
 Both end as local `hostadmin` on Host, and both are admitted only by a Host-plane certificate. A certificate from one plane must fail on another.
 
-**Not covered by the diagrams:** dynamic Host-local accounts (`hostctl account add`, UID 30000-39999, section 3). They are certificate-bound offline-style accounts with
-principal `<role>:<account>@<device-id>`. The diagrams do not show whether an LDAP online first hop can land on them. As written, online Host access maps only to the fixed `hostadmin` and `auditor`.
+**Not covered by the diagrams:** dynamic Host-local accounts (`hostctl account add`, UID 30000-39999, section 3). They are certificate-bound accounts with
+principal `<role>:<account>@<device-id>`. The diagrams do not show whether an LDAP online first hop can land on them. As implemented, online Host access maps only to the fixed `hostadmin` and `auditor`.
 
 ### 2.2 Why a certificate issued on the workstation can log in to the DUT
 
@@ -134,7 +125,7 @@ DUT stores CA PUBLIC key only      ---->   public key + role + device ID  --->  
    - the certificate was signed by a CA listed in `TrustedUserCAKeys` for that plane;
    - the certificate is inside its validity window;
    - the client holds the matching private key (SSH public-key challenge, so a copied certificate alone is useless);
-   - a principal in the certificate is allowed for the requested local account, here decided by `host-authorized-principals` (Host) or the zone's principal file (OTNS).
+   - a principal in the certificate is allowed for the requested local account, decided by `host-authorized-principals` on Host or by the zone's principal file on OTNS.
 4. **The device ID makes the certificate device-specific.** The accepted principal contains the DUT's own `kms-<SoC serial>`, so a certificate issued for another DUT is rejected even though it is validly signed by the same CA.
 5. **Separate CAs per plane make it plane-specific.** The DMZNS CA does not appear in Host/OTNS/ITNS trust, so a DMZNS certificate fails on Host or OTNS. That is why a Host or OT login needs a second, separately issued target-plane certificate.
 
@@ -147,7 +138,7 @@ Why this is safe to do from an ordinary workstation:
 
 Limits to keep in mind:
 
-- **Revocation is by expiry only.** I found no `RevokedKeys` directive in `sshd_config.host-internal`. A stolen private key plus its certificate works until the TTL ends. The 24-hour TTL is therefore the replay exposure noted in `ssh-rbac-design.md`. Shorter TTLs reduce it.
+- **Revocation is by expiry only.** The Host sshd configuration has no `RevokedKeys` directive. A stolen private key plus its certificate works until the TTL ends. With a 24-hour TTL that is the replay exposure. Shorter TTLs reduce it.
 - **Clock dependence.** Validity is checked against the DUT's clock. A badly wrong DUT clock can make valid certificates fail or expired ones pass.
 - **The CA is the root of trust.** Anyone who can write the DUT's `user-ca.pub` can mint accepted logins, so those files must stay root-owned and are updated only by the provisioning/trust-sync path.
 - **Second-hop key staging.** The target private key is briefly copied to DMZNS (`/run/user/<uid>/otit-ssh/`). It is session-scoped and removed after use, but during the session DMZNS holds it.
@@ -172,8 +163,8 @@ Authorization is decided in four places. They overlap on purpose.
 
 | Layer | Component | Decision |
 |---|---|---|
-| Network | nft plugins 40-43 (otit-separation) | Host sshd listens only on the DMZ veth. No LAN/WAN path to Host:22. |
-| Certificate | Host sshd + `host-authorized-principals` | Principal must match `<device-id>`-bound value for the local account (table below). |
+| Network | nft plugins 40-43 (otit-separation) | Host sshd listens only on the DMZ veth address. No LAN/WAN path to Host:22. |
+| Certificate | Host sshd + `host-authorized-principals` | Principal must match the `<device-id>`-bound value for the local account (table below). |
 | Account | `AllowGroups`, `Match Group auditor` | Only GID 6004/6005. Auditor gets `ForceCommand`, no forwarding. |
 | Session | `host-admin-session.c`, `host-admin-shell.py`, `host-admin-helper.c` | Each re-validates uid/gid/shell, and the helper re-validates the caller again. |
 
@@ -181,18 +172,17 @@ Principal derivation (`host-authorized-principals`, root-owned, ignores caller i
 
 | Local account | Principal accepted |
 |---|---|
-| `hostadmin` 10000:6004 | `host-admin@<device-id>` (legacy fixed) |
-| `auditor` 10800:6005 | `auditor@<device-id>` (legacy fixed) |
+| `hostadmin` 10000:6004 | `host-admin@<device-id>` (fixed) |
+| `auditor` 10800:6005 | `auditor@<device-id>` (fixed) |
 | dynamic 3xxxx:6004 | `host-admin:<account>@<device-id>` |
 | dynamic 3xxxx:6005 | `auditor:<account>@<device-id>` |
 | anything else | rejected |
 
-`<device-id>` is `kms-<SoC serial>`, read from `/var/persist/ssh-trust/device-id`. A certificate for another device, or a legacy generic
-certificate presented to a dynamic account, fails.
+`<device-id>` is `kms-<SoC serial>`, read from `/var/persist/ssh-trust/device-id`. A certificate for another device, or a fixed-account certificate presented to a dynamic account, fails.
 
 ## 4. Host-admin custom shell architecture
 
-Three binaries/scripts in one recipe (`host-admin-custom-shell_1.0.bb`):
+Three binaries/scripts in one recipe (`host-admin-custom-shell`):
 
 | Artifact | Install path / mode | Runs as | Role |
 |---|---|---|---|
@@ -226,18 +216,19 @@ Rejects any line over 256 chars or containing `| ; & \` $ < > \ /` or NUL. It th
 Parser rejections are sent to the helper as `audit-denied`. The user sees only `hostctl: request denied`. Detail stays in the audit log.
 The only interactive child is restricted Vim (`-Z -n -X -u /etc/custom-shell/vimrc -U NONE --noplugin -i NONE`), opened on a staged **candidate copy** of `/etc/hosts`, never on the target.
 The idle timeout (default 300 s, allowed 60-3600) is read from the policy file only if it is root-owned and not group/world-writable.
+The prompt is `<account>:<uid> [<UTC timestamp, seconds>] host> `.
 
 ### 4.3 Helper capabilities (`host-admin-helper.c`)
 
 | Capability | Mechanism | Bounds |
 |---|---|---|
 | `/etc/hosts` edit | stage -> Vim on candidate -> validate (hostname/line checks) -> diff -> apply -> discard | document mode; target must be regular root:root 0644; max 4 open transactions; 900 s TTL; audit fail-closed |
-| Service control | `systemctl show` eligibility check, then fixed `systemctl status/reload/restart` | concrete units only (excludes alias/template/generated/static/masked/transient/shutdown/emergency); must be active before mutation; 300 s per-unit rate limit; one fixed recovery restart on failure |
-| Diagnostics | fixed `execv` of ip/ss/ping/traceroute/dig/tcpdump | host namespace only; 45 s; 64 KiB output; target/interface validated |
+| Service control | `systemctl show` eligibility check, then fixed `systemctl status/reload/restart` | any concrete unit that is eligible (excludes alias/template/generated/static/masked/transient/shutdown/emergency); must be active before mutation; 300 s per-unit rate limit; one fixed recovery restart on failure |
+| Diagnostics | fixed-path `execv` of `ip`, `netstat`, `uptime`, `ping`, `traceroute`, `dig` | host namespace only; 45 s; 64 KiB output; target/interface validated |
 | Packet capture | `tcpdump` with fixed profiles (`icmp`, `dns`, `dhcp`) | 1-300 s; 16 MiB; 1 active per uid; spooled under `/var/lib/custom-shell/diagnostics`; no raw export |
-| Accounts | `useradd`/`usermod`/`chage`/`userdel` via `fixed_exec` | name `[a-z][a-z0-9_-]{0,31}`, denies root/hostadmin/auditor/nobody; lowest free uid in 30000-39999; primary GID 6004 or 6005 only; no supplementary groups; locked password (`-p '!'`); home `/home/local/<name>` 0700; delete refuses if the account has running processes |
+| Accounts | `useradd`/`usermod`/`chage`/`userdel` via `fixed_exec` | name `[a-z][a-z0-9_-]{0,31}`, denies root/hostadmin/auditor/nobody; lowest free uid in 30000-39999; primary GID 6004 or 6005 only; no supplementary groups; locked password (`-p '!'`); home `/home/local/<name>` 0700; delete runs `userdel -r` and refuses if the account has running processes |
 | Management firewall | `dmcli eRT getv/setv` on `Device.X_WNC_Firewall.WanSSH/WanWebUI.SourceIPv4Whitelist`, then `TriggerApply` | CIDR list only; rejects `0.0.0.0` and `/0`; never changes `Enable`; records prior value; verifies `Status=Active`, empty `LastError`; restores prior value on failure; 10 s / 4 KiB dmcli bound |
-| Cross-namespace flows | writes `/etc/ccsp/firewall/plugins.d/80-50-host-admin-flows.nft` | only dmzns<->otns and dmzns<->itns, one direction per rule; TTL 5 min-8 h; explicit port or bounded range |
+| Cross-namespace flows | writes `/etc/ccsp/firewall/plugins.d/80-50-host-admin-flows.nft` | four fixed directions only (dmzns->otns, otns->dmzns, dmzns->itns, itns->dmzns) mapped to fixed veths and addresses; TCP or UDP only; one port or a range of at most 128 ports; TTL 5 min-8 h; dmzns->otns TCP/22 is rejected because a static rule already owns it |
 
 Helper caller validation: uid/gid must be `hostadmin` 10000:6004 or a dynamic 30000-39999:6004 account whose shell is the session binary.
 The credential ID is read from the session-context file, which must be under `/run/custom-shell/session/<uid>/`, root-owned, and mode 0600 or tighter.
@@ -259,7 +250,7 @@ For dynamic accounts, the credential must equal the account name.
 | `/var/lib/custom-shell/{transactions,diagnostics,accounts,firewall,flows}` | root 0700 | transaction/capture/account/firewall/flow records |
 | `/var/log/custom-shell/host-admin-<uid>.log` | root 0640 | JSONL audit, one file per uid |
 
-All are created by `custom-shell.conf` tmpfiles, shipped by the owning recipe. They are not created in `pkg_postinst`, which is consistent with Rule 9.
+All are created by tmpfiles (`custom-shell.conf`) shipped by the owning recipe, not by a package post-install script, so ownership survives the OSTree image.
 
 ## 6. Audit model
 
@@ -268,16 +259,16 @@ Session events add `event_type` (`session.login|idle_timeout|logout`), duration 
 Records are root-owned and written with `O_APPEND|O_NOFOLLOW`, with owner and mode re-verified on every write, then `fflush` + `fsync`.
 Parser denials are audited too. Console messages are generic by design.
 
-## 7. Design observations and gaps
+## 7. Review findings
 
-These are findings from reading the code. They are not yet confirmed on the DUT, so treat them as review items.
+These come from a static review of the source and the baseline design. They are not yet confirmed on the DUT.
 
 ### 7.1 Policy file is mostly decorative
 `host-admin-shell.py` reads only `idle_timeout_seconds` from `host-admin-policy.json`. Every other limit (TTL, rate limit, capture bounds,
 account ranges, flow TTL, allowed roles) is a `#define` in `host-admin-helper.c`. The session binary hardcodes `IDLE_TIMEOUT_SECONDS 300` for its
 audit record, even though the shell takes the value from the policy file. Editing the JSON therefore changes the shell's timeout but not the
-audit field, and changes nothing else. The `version` field (`p1.8-p1.11`) also lags the P1.12 flow code.
-Either make the helper load the policy and fail closed, or reduce the JSON to the one field it controls.
+audit field, and changes nothing else. The policy `version` string (`p1.8-p1.11`) also lags the flow-management code.
+The baseline (section 9) requires a server-owned policy that the privileged side enforces. Either make the helper load the policy and fail closed, or reduce the JSON to the one field it controls.
 
 ### 7.2 Session-context files are never removed
 `host-admin-session.c` creates `/run/custom-shell/session/<uid>/<pid>.json` but has no `unlink` on logout. The helper accepts any root-owned 0600 file
@@ -286,48 +277,50 @@ example one authenticated with a certificate with a different Key ID) would sati
 For dynamic accounts the Key ID must still equal the account name, which limits the impact. For the fixed `hostadmin` account, attribution could
 point at an older certificate. `/run` is tmpfs and clears on reboot, but not between sessions.
 
-### 7.3 Plan and implementation drift (P1.12)
-- The plan lists `flow list` and an ICMP protocol with an optional port. The shell accepts a fixed 15-token `flow stage add` form (port and TTL mandatory), its help text says `tcp|udp`, and there is no `flow list` verb.
-- The plan says `account list` reports `retired`. `account_list()` in the working tree reports only `active` or `suspended`. `p1.11-account-delete-lifecycle-plan.md` made immediate delete the behavior, so retirement metadata is described as obsolete. The P1.12 text should be updated to match.
-- `p1.10-p1.11` plan says new accounts get a private same-name group. `account-bound-host-certificate-login-plan.md` and the policy file say no private group, with a shared GID 6004/6005. The latter is current. The older plan is stale.
+### 7.3 Differences from the baseline design
+
+Compared with `Host_Admin_Customized_Shell_Design.md`. Severity is the reviewer's judgement.
+
+| # | Topic | Baseline | Implementation | Severity |
+|---|---|---|---|---|
+| 1 | Account removal | Table 3 and 6.4: retire only. "No ... immediate evidence-destroying deletion"; irreversible deletion is outside the role. | `hostctl account delete` runs `userdel -r`, which removes the home directory. There is no `retire`. Delete is refused only when the account has running processes. | High: contradicts a stated prohibition (ACCT-01) |
+| 2 | Service scope | 6.3: only allowlisted units; aliased, templated or unlisted units fail closed. | Policy scope is `all-eligible-concrete-host-services`. Any eligible active unit can be restarted, including `sshd`, `NetworkManager` and `ccsp-zone-firewall`. | High: allowlist replaced by a denylist (SVC-01) |
+| 3 | SSHD configuration | Appendix A: no SSHD directive may be added, removed or modified without a separate design review. | The Host sshd config now uses `AuthorizedPrincipalsCommand` instead of a principals file, `AllowGroups host-admin auditor` instead of `AllowUsers`, and `Match Group auditor` instead of `Match User auditor`. | High: the required review is not evidenced here |
+| 4 | Editor confinement | 6.2.4 and CFG-03: Vim runs in a dedicated `host_admin_editor_t` SELinux domain that can write only the candidate. | No `host_admin` type exists in the SELinux policy recipe. Vim confinement rests on its command-line flags and `vimrc` only. | Medium: baseline control absent (CFG-03) |
+| 5 | Credential ID | 8.2: `sshcert:sha256:<digest>` of CA fingerprint, serial and key fingerprint. Identifies one credential instance; renewal changes it. | The ID is the certificate Key ID text. For dynamic accounts it equals the account name, so it is identical across renewals. | Medium: does not identify the credential instance (AUD-04) |
+| 6 | Audit schema | Tables 7 and 8: `event_id`, `correlation_id`, `category`, `type`, nested `source.*`, `schema_version`, SSH context (address, serial, fingerprint, principal). | Flat record with `timestamp`, `role`, `local_account`, `uid`, `credential_id`, `command`, `event_result`, `failed_reason`. | Medium: events cannot be correlated or classified (AUD-01) |
+| 7 | Account model | One fixed identity: principal `host-admin@kms-<device-id>`, local user `hostadmin`. | Adds dynamic accounts (UID 30000-39999) with account-bound principals `<role>:<account>@<device-id>`. Any host-admin can create or delete other host-admins and auditors. | Medium: new model, not in the baseline |
+| 8 | Firewall surface | Section 5.2: `firewall show\|validate\|apply\|rollback` and `network` commands. | `firewall management` (WAN SSH/WebUI whitelists) and `firewall flow` (time-limited cross-namespace rules, TCP/UDP only). No `network` commands. | Medium: grammar and scope differ, flows are new |
+| 9 | Prompt | 5.1: UTC to the minute, `host>`. Section 14.2 uses `hostctl>`. | UTC to the second, `host>`. | Low: the baseline itself is inconsistent between 5.1 and 14.2 |
+| 10 | Command domains | `config get\|set`, `rdkb`, `logs`, `namespace config`, `certificate`, `network`. | Not present in the grammar. | Informational: the baseline schedules these in later work packages |
+| 11 | Phase gate | Section 14.1: no other state-changing domain until the configuration-edit gate (CP0-CP7) is accepted. | Services, accounts, firewall and diagnostics are all enabled. No gate evidence was reviewed. | Process: confirm the gate decision |
 
 ### 7.4 Dynamic-account blast radius
 A dynamic host-admin account has the same `hostctl` rights as `hostadmin`, including creating and deleting other host-admin accounts and changing
-WAN SSH/WebUI whitelists. There is no sub-role split. Whether a host-admin may delete or suspend their own account, or the last remaining admin, is not checked by the code I read.
+WAN SSH/WebUI whitelists. There is no sub-role split. The code does not check whether a host-admin may suspend or delete their own account, or the last remaining admin.
 
-### 7.5 Non-interactive path skips idle timeout
-When `SSH_ORIGINAL_COMMAND` is set, `main()` dispatches once and returns without arming the idle timer. That is acceptable for a single command, but it is also
-a path the plan docs do not describe. Note that `ForceCommand` is applied only to the auditor, not to host-admin.
-
-### 7.6 Enforcement status
-- SELinux is `permissive` distro-wide and was reported disabled on the DUT in the plan docs. No enforcing-mode AVC sweep exists for `host-admin-helper`, `host-admin-session`, or the `custom-shell` paths (Rule 6 is open).
-- The setuid helper's world-executable 4755 mode depends entirely on the in-process caller check. There is no group restriction on the binary itself, for example `4750 root:host-admin`. That would add a filesystem-level layer. It must be weighed against dynamic accounts, which all share GID 6004, so it would work.
-- Certificate TTL is 24 h (documented as a known replay exposure).
+### 7.5 Enforcement status
+- The distro default SELinux mode is permissive. No enforcing-mode AVC check for `host-admin-helper`, `host-admin-session` or the `custom-shell` paths is evidenced here.
+- The setuid helper is mode 4755, so any local user can execute it and the in-process caller check is the only gate. The baseline (7.2) treats direct helper invocation as an expected hostile path. A group restriction on the binary itself (for example `4750 root:host-admin`) would add a filesystem-level layer. All dynamic host-admin accounts share GID 6004, so it would still work for them.
+- Non-interactive use (`SSH_ORIGINAL_COMMAND`) dispatches one command and returns without arming the idle timer. `ForceCommand` is applied only to the auditor.
+- Certificate TTL is 24 h, which is the replay exposure noted in 2.2.
 
 ## 8. Side effects and caveats
 
-- Image impact: `host-admin-custom-shell` RDEPENDS on `ccsp-dmcli` and `ccsp-zone-firewall`, so the shell now depends on the CCSP stack being healthy. A dmcli failure fails closed (request denied).
+- Image impact: `host-admin-custom-shell` depends on `ccsp-dmcli` and `ccsp-zone-firewall`, so the shell now depends on the CCSP stack being healthy. A dmcli failure fails closed (request denied).
 - Boot: `host-admin-account-migration.service` and `ssh-plane-trust-sync/activate` run at boot. They fail closed on UID/GID conflicts.
-- Security: setuid-root C code with about 1,200 lines of helper logic is the main attack surface. Static analysis is not wired into CI.
-- Identity reuse: account delete is irreversible and frees the UID/GID (`p1.11-account-delete-lifecycle-plan.md`). A later account can reuse the number, so audit analysis must key on `local_account` + `credential_id`, not UID alone.
+- Security: setuid-root C code with about 1,200 lines of helper logic is the main attack surface.
+- Identity reuse: account delete is irreversible and frees the UID/GID. A later account can reuse the number, so audit analysis must key on `local_account` + `credential_id`, not UID alone.
 - Compatibility: SSH usernames (`hostadmin`) differ from certificate principals (`host-admin@...`). Operators must not infer one from the other.
-- Assumption: this document reflects the working tree, including uncommitted changes to the helper, shell, session, policy, tmpfiles and sshd config. Those are not yet DUT-verified in this pass.
+- Assumption: this document reflects the source as reviewed, including recent changes to the helper, shell, session binary, policy, tmpfiles and sshd config. None of it is DUT-verified in this review.
 
-## 9. Status of older documents
-
-`docs/ot-it-dmz-zones-rbac/design.md` describes the earlier `dmz-access-broker` model: LDAP role claim -> broker -> host **root** shell,
-with Host re-authentication explicitly deferred. The certificate second hop and the `hostctl` shell replace that model for Host access.
-Keep the document as history, and add a "superseded for Host access" note at the top. Its still-valid content is the six-role GID table and the
-LDAP data fixes. A grep of `layers/meta-wnc` found no `dmz-access-broker` recipe under `recipes-security` and no `.bb`/`.bbappend`/`.inc` reference to it, so the
-broker and its `HOST` root-shell target appear to be gone from the current tree. I did not check git history for when it was removed.
-
-## 10. WebGUI RBAC (separate system)
+## 9. WebGUI RBAC (separate system)
 
 The WebUI (`rdkb-webui-spa`, `jstapi/_common.jst`) has its own roles, `admin > operator > viewer`, controlled by syscfg `webui_rbac_mode`
 (`admin_only` default) and per-category write guards. It is independent of the SSH/Host RBAC above and shares no identity store with it.
 A unified mapping between the two models does not exist yet.
 
-## 11. Verification references
+## 10. Verification references
 
 | Area | Artifact |
 |---|---|
@@ -336,4 +329,15 @@ A unified mapping between the two models does not exist yet.
 | Account migration | `tests/dut/host-admin-account-migration/` |
 | Second hop with external KMS | `tests/dut/otit-second-jump-external-kms/` |
 
-Tests for the open items in section 7 do not exist yet. Section 7.2 (stale session context) and 7.3 (grammar versus plan) are the cheapest to cover.
+The acceptance criteria are in section 11 of `Host_Admin_Customized_Shell_Design.md`. The findings above map to these:
+
+| Finding | Acceptance criteria affected |
+|---|---|
+| 7.3 #1 account delete | ACCT-01 |
+| 7.3 #2 service scope | SVC-01 |
+| 7.3 #4 editor confinement | CFG-02, CFG-03 |
+| 7.3 #5, #6 and 7.2 attribution | AUD-01, AUD-04 |
+| 7.3 #9 prompt | UI-01 |
+| 7.1 policy enforcement | PHASE-01 |
+
+None of the tests listed above is known to cover 7.2 (stale session context) or 7.3 #1-#3. Those are the cheapest to add.
