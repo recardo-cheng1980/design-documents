@@ -97,10 +97,11 @@ events are collected by the Host wherever possible; any required source-side
 instrumentation belongs to its owning service and does not justify a general
 zone checker. No task is currently proven to require a checker in any zone.
 
-The DUT exposed the three merged zone `/etc/shadow` paths to Host root. Verify
-live mount resolution, race handling, zone lifecycle and SELinux enforcing access
-before relying on those paths. File visibility alone does not prove safe or
-complete monitoring.
+The [architecture diagram](credential-compliance-monitoring-design.md#architecture)
+shows password owners updating protected first-change records and the Host
+collecting their status. No separate password checker is needed. Validate record
+location, account/provisioning binding, live mount resolution, zone lifecycle
+and SELinux enforcing access. Shadow visibility is not first-change evidence.
 
 ## Result semantics
 
