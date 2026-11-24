@@ -15,16 +15,43 @@ SIEM path without exposing passwords, hashes, private keys or signing payloads.
 
 ## Architecture
 
-```text
-Host and zone credential inventory ──> periodic compliance checks ──┐
-Host kernel audit: file access ──────> audit event correlation ─────┤
-Host TPM signing brokers ────────────> signing access events ───────┤
-Password, TLS/SSH service logs ──────> authentication events ──────┤
-                                                                   v
-                                               Host journal / local retention
-                                                                   |
-                                               Host rsyslog -> TLS -> SIEM
+```mermaid
+flowchart TD
+    subgraph sources["Host, DMZ, IT and OT evidence sources"]
+        W["Provisioning and password owners"]
+        R["Protected first-change status per account"]
+        C["Certificate and key configuration"]
+        A["Linux Audit and TPM broker events"]
+        E["Password, WebUI, SSH and TLS outcomes"]
+        W -->|"Provision, reset or successful password update"| R
+    end
+
+    P["Host policy and inventory"]
+    H["Host monitor: status, policy evaluation and events"]
+    L["Host journal and local retention"]
+    F["Host rsyslog with TLS forwarding"]
+    S["SIEM"]
+
+    R -->|"Read-only status; unavailable means unknown"| H
+    C --> H
+    A --> H
+    E -->|"Verified Host-accessible sources"| H
+    P --> H
+    H --> L
+    L --> F
+    F --> S
 ```
+
+Provisioning and password owners maintain the first-change record as part of
+their existing lifecycle operations: provisioning or reset records
+`change_required`, and a successful password update records `change_completed`.
+The Host monitor reads that record at boot,
+periodically and after relevant notifications; no separate password checker,
+default-password comparison or per-zone monitoring daemon is required. The record
+contains status and account/provisioning identity, not initial password values
+or baseline hash copies. Certificate/key policy evaluation and usage-event
+collection remain part of the Host monitor. Zone-source interfaces and delivery
+coverage still require DUT verification.
 
 The Host owns the policy and monitoring service. Existing zone roots and
 namespaces are inspected through explicitly controlled Host interfaces; do not
@@ -39,12 +66,11 @@ reliably from the Host and is available inside that zone; document the evidence
 and narrow interface before adding one. A zone may need no checker. If neither
 side can obtain a datum, report unknown rather than inventing an adapter.
 
-The configured LXC rootfs paths are Host-managed, and the DUT exposed all three
-merged `/etc/shadow` paths to Host root during inspection. This establishes path
-visibility, not correct live-mount resolution, permission under SELinux enforcing,
-or safe and accurate access during zone lifecycle changes. Verify those properties
-before choosing the Host-side implementation; do not duplicate a shadow checker
-in a zone merely because the account belongs there.
+The configured LXC rootfs paths are Host-managed. For first-change monitoring,
+validate the live location and protection of the authoritative lifecycle record,
+its account/provisioning binding, SELinux enforcing access and behavior during
+zone lifecycle changes. Visibility of a zone's shadow file is not the status
+source and does not require a shadow checker.
 
 ### Responsibility and collection matrix
 
