@@ -6,7 +6,9 @@ Status: proposed; implementation and DUT verification are pending.
 
 Continuously monitor password authentication and certificate and private-key
 configuration and use across the Host, DMZ, IT and OT planes, regardless of
-whether credentials are defaults. Separately detect known factory defaults.
+whether credentials are defaults. Track completion of the first password change
+for per-device initial passwords; separately detect known factory-default public
+certificate and key identities.
 Support TPM-backed keys accessed through approved signing brokers and
 file-based keys. Emit actionable evidence to the existing Host logging and
 SIEM path without exposing passwords, hashes, private keys or signing payloads.
@@ -49,7 +51,7 @@ in a zone merely because the account belongs there.
 | Information or task | Responsible component | Validation or limitation |
 | --- | --- | --- |
 | Zone services, accounts, configured authentication paths and credential inventory | Host | Resolve names and configuration in the correct zone context; verify live mounts, namespace identity and lifecycle. |
-| Local password default comparison and account/login state | Host | Use narrowly scoped access to the appropriate authority; visibility of a shadow path alone is insufficient to establish a safe live read or an enabled login path. |
+| Initial password change status and account/login state | Host | Read authoritative lifecycle status through an approved interface; verify its binding to the account and provisioning generation. A shadow path or expiry flag alone does not prove a completed password change or an enabled login path. |
 | Certificate and file-key configuration, metadata and known-default public identities | Host | Resolve the running consumer's actual configuration and mounts; do not export private key material. |
 | File-key access events | Host Linux Audit collector | Verify namespace attribution, denial visibility, rotation, event loss and rules on the DUT. |
 | TPM signing and public identity | Host broker or other verified Host-side source | Verify request attribution and outcome; identify direct TPM clients and report unsupported coverage. |
@@ -69,7 +71,8 @@ owned by that service and is not automatically a separate zone checker.
 A versioned, root-controlled policy maps each plane and service to its expected
 account, certificate purpose, allowed issuer or trust anchor, certificate
 location, key storage type, approved broker or file path, expected callers,
-expiration thresholds and password-login state. Identify roles and accounts by
+expiration thresholds, initial-password change requirements, authoritative status
+sources and password-login state. Identify roles and accounts by
 names resolved through the appropriate plane's NSS, not fixed numeric IDs.
 Provide explicit defaults in configuration and fail visibly if a required
 policy entry or source cannot be evaluated. Record policy version in events.
@@ -87,16 +90,27 @@ Run at boot, on a bounded periodic schedule, and after relevant password,
 commissioning, renewal, reset or configuration changes. Persist the last
 successful scan and raise a monitoring-health event on failure or stale data.
 
-* **Passwords:** for each managed account in each plane, test the shipped
-  default against its current shadow hash using the hash's own algorithm and
-  salt; also report first-login expiry and whether password authentication is
-  enabled. Keep password-present and login-enabled as separate findings. Never
-  transmit or log password candidates, hashes or shadow records. Do not reset
-  credentials or change expiry. Detection covers known shipped defaults only.
-  For all password authentication, collect success and failure outcomes from
-  each authoritative authentication service where supported, regardless of
-  default status. Distinguish attempted, rejected and successful authentication;
-  do not infer the password used or its default status from a generic event.
+* **Initial password change status:** for each applicable managed account and
+  authority in each plane, read an authoritative persistent lifecycle record:
+  `change_required`, `change_completed` or `unknown`. Initial provisioning,
+  factory reset or reprovisioning of an initial password starts a new provisioning
+  generation in `change_required`. The password-owning component records
+  `change_completed` only after a successful password update for that account
+  and generation; failed or cancelled changes must not complete it. Persist and
+  protect the record across reboot and ordinary OTA, keeping independently managed
+  plane accounts separate. Missing, stale, inconsistent or legacy records without
+  trusted migration evidence are `unknown`, never inferred complete. Define
+  crash recovery so an interrupted update cannot falsely report completion.
+  The monitor reads this status and does not maintain initial password candidates
+  or baseline hashes, compare passwords against shadow, or attempt logins.
+  This does not remove the authentication owner's normal password hash storage.
+  Report lock/expiry and password-login exposure separately; unlocking an account,
+  clearing an expiry flag or observing a login does not establish completion.
+  The state proves an initial change was completed, not that the current password
+  differs from the initial value or that it was never changed back.
+  For all password authentication, collect success and failure outcomes from each
+  authoritative authentication service where supported. Distinguish attempted,
+  rejected and successful authentication without inferring the password used.
 * **Factory-default file and TPM credentials:** maintain an authenticated,
   versioned inventory of known factory-default public certificate fingerprints
   and public-key fingerprints, with product, image and phase applicability.
@@ -180,7 +194,7 @@ deduplicated compliance-state alerts; report dropped or aggregated usage events.
 Never include passwords, shadow hashes, private keys, PINs, tokens,
 certificate signing payloads or secret-bearing configuration values.
 
-Suggested event types: `credential.default_password`,
+Suggested event types: `credential.initial_password_change_state`,
 `credential.password_login_state`, `certificate.expiring`,
 `certificate.invalid`, `key.storage_mismatch`, `key.file_access`,
 `key.sign_request`, `authentication.result`, and `monitor.health`. Send state
@@ -195,8 +209,9 @@ or the syslog signing broker fails.
 
 ## Security and operational constraints
 
-Run the monitor with the minimum privilege needed for protected shadow and
-certificate metadata. Separate privileged collection from policy evaluation
+Run the monitor with the minimum privilege needed for authoritative password
+lifecycle status, account/login state and certificate metadata. Initial-change
+monitoring does not require shadow hash access. Separate privileged collection from policy evaluation
 where practical. Use fixed allowlists and safe file traversal, reject symlink
 and replacement races, bound parsing and output, and protect policy and local
 state from unprivileged modification. Evaluate SELinux rules in enforcing mode;
@@ -211,12 +226,14 @@ IDs, credentials or server endpoints.
 2. Define policy and event schemas, account/phase handling, missing-evidence
    states and SIEM rules. Decide the scan interval, retention, alert thresholds
    and authorized readers from measured DUT behavior.
-3. Implement a bounded password and certificate compliance scanner and
+3. Implement a bounded initial-password change-status and certificate scanner and
    authentication-event collection for supported services, followed by file-access
    audit rule reconciliation and broker event instrumentation only where the
    trusted boundary supports it. Report per-source coverage throughout.
 4. Add a repeatable host or DUT test artifact under `tests/`, cross-linked here.
-   Test default and changed passwords, authentication disabled, valid/expired
+   Test initial change required/completed/unknown, failed and interrupted changes,
+   independent plane accounts, reset/reprovisioning generations, reboot/OTA
+   persistence, legacy or tampered state, authentication disabled, valid/expired
    certificates, unexpected issuer, TPM/file mismatches, unauthorized access,
    atomic key rotation, broker denial, missing evidence and audit loss.
    Include known-default and changed file/TPM public identities, unknown
@@ -240,3 +257,9 @@ attribute activity if its logs or trusted peer identity are unavailable. Zone
 logs, direct TPM clients and audit queue loss are explicit coverage gaps until
 verified. Existing services, provisioning and password-login controls must
 continue to work throughout monitoring failures.
+
+Initial-password change status is a lifecycle assertion, not default-password
+detection. Its accuracy depends on trusted provisioning and password-update
+integration, protected persistent state and recovery. It cannot detect a later
+return to the initial password. No baseline password or hash copy is retained
+by the monitoring subsystem.
