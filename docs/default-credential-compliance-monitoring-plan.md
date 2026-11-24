@@ -1,16 +1,16 @@
-# Continuous credential usage and default compliance monitoring
+# Continuous credential usage and initial password change monitoring
 
 Status: proposal; implementation, coverage inventory and DUT validation are pending.
-This develops the usage and default-credential portions of the broader
+This develops the usage, initial-password lifecycle and default public-identity
+portions of the broader
 [credential monitoring design](credential-compliance-monitoring-design.md).
 
 ## Goal and scope
 
 Monitor password, file-backed and TPM-backed credential operations and
-authentication outcomes regardless of default status. Separately detect known
-factory or image-default credentials that remain usable, and report confirmed
-authentication with a known default only when the authentication owner can
-provide that evidence. Cover Host, IT, DMZ and OT local accounts and WebUI
+authentication outcomes regardless of default status. For per-device initial
+passwords, report whether the first password change has completed. Separately
+detect configured known factory-default certificate and public-key identities. Cover Host, IT, DMZ and OT local accounts and WebUI
 accounts first, and extend coverage to file-backed and TPM-backed identities.
 Inventory other active services and their credential authorities
 before claiming coverage; LDAP, external systems and opaque password stores need
@@ -19,31 +19,38 @@ their own supported interfaces. An uninspectable authority is unknown, not compl
 ## Proposed design
 
 1. Maintain a versioned, root-controlled policy inventory of plane, service,
-   authority, account, applicable image/vendor default identifiers and approved
-   source. Resolve names using the owning plane's context, not fixed numeric UID. Defaults
-   must come from an authoritative versioned source; never invent candidates or
-   record unique provisioning secrets. Explicitly identify retired defaults that
-   remain relevant after upgrades.
+   authority, account, whether an initial password change is required, and the
+   approved authoritative lifecycle-status source. Resolve names using the owning
+   plane's context, not fixed numeric UID. Keep known factory-default public
+   identities in a separate authenticated inventory with product/image/phase
+   applicability. Policy and monitor state contain no initial password candidates
+   or baseline password hashes.
 2. Run bounded read-only checks at boot and periodically (initial proposal: hourly),
    plus after known password, configuration, provisioning, reset and zone lifecycle
    events. A periodic full reconciliation covers missed notifications. Define a
    maximum scan duration, retry/backoff and freshness threshold; missing or stopped
    required planes and failed sources produce unknown and health alerts.
-3. For local shadow-backed accounts, a narrowly scoped Host-side privileged
-   checker compares only authoritative known default candidates using the stored
-   hash algorithm and salt, without interactive login attempts. Validate algorithm
-   support and resource limits. A locked, empty, malformed or unsupported hash has
-   an explicit state; never label an unsupported hash compliant. Determine password
-   login exposure separately from credential match, including account lock/expiry
-   and each relevant authentication path. A default can remain present even when a
-   particular login path is disabled.
-4. WebUI and other non-shadow authorities require owner-provided, read-only
-   compliance status or an equivalent verified interface. The existing WebUI
-   `Default_PWD` authentication result can signal an observed default login at
-   the point of authentication, but does not itself provide a periodic inventory.
-   Do not replay passwords against live authentication endpoints or infer success
-   from a login event alone. Explicitly account for each supported authority's
-   defaults, disabled accounts and provisioning lifecycle.
+3. For each applicable local account, read an authoritative persistent status
+   bound to its plane, authority, account and provisioning generation. Initial
+   provisioning, factory reset or reprovisioning of an initial password sets
+   `change_required` for the new generation. The password-owning component sets
+   `change_completed` only after a successful password update; failed, cancelled
+   or interrupted operations must not falsely mark completion. Define consistent
+   update and crash-recovery behavior before implementation. Preserve status
+   across reboot and ordinary OTA; independently managed accounts in different
+   planes have independent state. Missing, stale, inconsistent or untrusted state,
+   including legacy devices without trusted migration evidence, is `unknown`.
+   The monitor does not retain initial passwords or hash copies, compare password
+   candidates with shadow, or attempt live logins. Authentication owners retain
+   their normal password hashes as needed. Collect account lock/expiry and
+   per-path login exposure separately; none alone proves a completed change.
+4. WebUI and other non-shadow authorities follow the same lifecycle contract
+   through an owner-provided read-only status interface. Verify whether accounts
+   share an authority before mapping completion across interfaces; a WebUI change
+   must not mark an independently managed OS or other plane account complete.
+   The existing WebUI `Default_PWD` result does not by itself establish first-change
+   completion. Do not infer completion from a login, a visited password-change
+   page or a cleared expiry flag. An unavailable authority reports `unknown`.
 5. The Host collects and checks every zone source it can access reliably through
    an approved interface. Add a plane-owned adapter only for a specific source
    proven inaccessible or unreliable from the Host but available inside that
@@ -73,7 +80,8 @@ their own supported interfaces. An uninspectable authority is unknown, not compl
 
 ## Host and zone responsibility
 
-The Host owns inventory, scheduling, account and credential compliance checks,
+The Host owns inventory, scheduling, initial-password status and other credential
+compliance checks,
 Linux Audit collection, Host TPM broker events, collection of authentication
 events available from the Host, correlation, forwarding and monitoring health.
 Host journal collection does not by itself cover zone journals: investigate a
@@ -89,23 +97,36 @@ events are collected by the Host wherever possible; any required source-side
 instrumentation belongs to its owning service and does not justify a general
 zone checker. No task is currently proven to require a checker in any zone.
 
-The DUT exposed the three merged zone `/etc/shadow` paths to Host root. Verify
-live mount resolution, race handling, zone lifecycle and SELinux enforcing access
-before relying on those paths. File visibility alone does not prove safe or
-complete monitoring.
+The [architecture diagram](credential-compliance-monitoring-design.md#architecture)
+shows password owners updating protected first-change records and the Host
+collecting their status. No separate password checker is needed. Validate record
+location, account/provisioning binding, live mount resolution, zone lifecycle
+and SELinux enforcing access. Shadow visibility is not first-change evidence.
 
 ## Result semantics
 
-Per authority/account, expose `default_present`, `default_absent`, `unknown` or
-`not_applicable`, separately from `login_enabled`, `login_disabled` or `unknown`
-per path. An authentication owner may additionally emit `default_login_success`
-or `default_login_rejected` only when it can establish the candidate was the
-default and report the actual outcome. A default-present finding is a configuration
-risk, not proof of a login; absence of a default match only covers inventoried
-known defaults, not password strength or previously observed use.
+For each applicable authority/account, expose `change_required`,
+`change_completed` or `unknown`, separately from `login_enabled`,
+`login_disabled` or `unknown` per path. Policy may mark an initial-change
+requirement `not_applicable` only with an explicit account/authority rationale;
+unavailable evidence is always `unknown`.
+
+| State | Meaning |
+| --- | --- |
+| `change_required` | The current initial-password provisioning generation has not completed its required password update. |
+| `change_completed` | The password owner authoritatively recorded a successful update for that account and generation. |
+| `unknown` | Required status is missing, stale, inconsistent, unsupported or not trustworthy. |
+
+Completion proves a lifecycle step, not the current password value, password
+strength or absence of a later change back to the initial password. Such change-back
+detection is outside this password compliance check. Keep factory-default public
+identity findings separate; do not reuse password lifecycle states for them.
+Authoritative authentication events remain separate from lifecycle status and
+must not infer default password use from either status or a generic login.
 
 Events include device, plane, authority, account, check or event time, policy
 version, event type, operation, outcome, authentication method, credential type,
+initial-change state and provisioning generation for lifecycle status,
 evidence source and error category when known. Identify unavailable fields as
 unknown. Preserve individual usage events separately from deduplicated compliance
 alerts and report any collection loss or aggregation. Never emit password candidates,
@@ -114,6 +135,11 @@ state and policy modifications; bound output, rate and retention. Monitoring mus
 not reset credentials, alter expiry or block authentication. Separate bootstrap and
 commissioned TPM phases and never infer factory credentials from bootstrap state.
 
+Use `credential.initial_password_change_state` for lifecycle state changes,
+recovery and bounded reminders. A completed-state event is not an authentication
+event. Protect state writes so only the authorized provisioning/password owners
+can update them; the Host monitor reads status through its approved interface.
+
 ## Feasibility and implementation plan
 
 The current DUT has auditd and rsyslog active and SELinux permissive; this alone
@@ -121,11 +147,13 @@ does not prove event delivery, zone coverage or access under enforcing mode. The
 existing unique initial password plan in the UCT-IQ9075 repository
 describes per-device provisioning and independent subsequent plane changes. WebUI
 login code recognizes `Default_PWD`; its authoritative periodic inspection
-interface and all other supported credential stores remain to be verified.
+interface, authoritative first-change records, password-update integration and
+all other supported credential stores remain to be verified.
 
-1. Inventory active authorities, default provenance and upgrades, authentication
-   paths, zone lifecycle and current events without exposing credentials. Verify
-   safe APIs, shadow hash algorithms, performance and SELinux labels/AVCs. Mark
+1. Inventory active authorities, initial-password provisioning and update paths,
+   reset/upgrade behavior, authentication paths, zone lifecycle and current events
+   without exposing credentials. Verify authoritative persistent status, generation
+   binding, recovery, safe APIs, performance and SELinux labels/AVCs. Mark
    unsupported authorities unknown and settle interfaces before implementation.
 2. After approval, add Host-owned collection and aggregation under the owning
    `meta-wnc` recipes, with explicit dependencies, bounded timers, policy, state
@@ -135,11 +163,14 @@ interface and all other supported credential stores remain to be verified.
    authentication evidence only where the actual outcome can be proven.
 3. Add repeatable host tests under `tests/host/` and, as needed, a DUT suite under
    `tests/dut/default-credential-compliance/` with a README linking this plan.
-   Test default, changed, locked, expired, disabled, unsupported/malformed hashes,
-   unknown authorities, stale and missing planes, rotations, restarts, event loss,
+   Test change-required/completed/unknown, successful/failed/cancelled/interrupted
+   updates, reset and reprovisioning generations, independent plane/authority
+   accounts, reboot/OTA persistence, legacy/missing/stale/tampered state,
+   locked/expired/disabled accounts, unknown authorities, stale and missing
+   planes, rotations, restarts, event loss,
    redaction, known-default and changed file/TPM identities, unavailable TPM,
-   unsupported PIN status, phase transitions, and actual default-login
-   success/rejection separately. Exercise non-default password authentication,
+   unsupported PIN status, phase transitions, and authentication
+   success/rejection separately from first-change completion. Exercise non-default password authentication,
    file-key and TPM operations, authentication outcomes and source loss. Use synthetic
    fixtures, never production credentials. Link completed tests here.
 4. Stage and exercise safely on the DUT before any build, inspect service health,
@@ -150,15 +181,18 @@ interface and all other supported credential stores remain to be verified.
 
 ## Side Effects & Caveats
 
-- Protected password verification requires carefully constrained privilege and
-  may consume CPU; bound checks and do not expose offline-cracking material.
-- Hourly scans leave a detection window; event notifications reduce but cannot
-  eliminate it. Actual default use is observable only at instrumented authorities.
+- Initial-change status requires trusted provisioning and password-update
+  integration and protected persistent records. It does not require retained
+  initial passwords, baseline hash copies or offline password verification.
+- Hourly scans leave a status-reporting window; event notifications reduce but
+  cannot eliminate it. Completion does not detect a later change back to the
+  initial password and does not prove successful authentication.
 - Zone unavailability, unsupported stores, stale policy, unverified forwarding and
   unknown authentication paths are visible coverage gaps, never passes.
 - SELinux is currently permissive; required enforcing rules cannot be specified
   safely until implementation-specific AVCs and labels are observed.
 - The initial interval, retention, eligible services and event transport are
   design assumptions requiring operational and DUT validation.
-- Host-side access to zone credential stores increases Host collector privilege;
-  constrain it, avoid exporting hashes, and validate SELinux and lifecycle races.
+- Host access to authoritative zone status must be constrained and validated
+  under SELinux enforcing and zone lifecycle changes. Shadow visibility alone
+  cannot establish first-change completion.
